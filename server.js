@@ -5,8 +5,13 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Enable CORS so your local game and Render site can connect
-const io = new Server(server, { cors: { origin: "*" } });
+// Enable CORS with explicit methods to guarantee connections
+const io = new Server(server, { 
+    cors: { 
+        origin: "*",
+        methods: ["GET", "POST"] 
+    } 
+});
 
 const players = {};
 
