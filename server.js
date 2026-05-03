@@ -18,14 +18,20 @@ const players = {};
 io.on('connection', (socket) => {
     console.log('Player connected:', socket.id);
     
-    // Default spawn position
-    players[socket.id] = { x: 16, y: 30, z: 16, ry: 0, rx: 0 };
+    // Wait for the player to click "Play" and send their name
+    socket.on('joinGame', (playerName) => {
+        // Save their name along with their spawn position
+        players[socket.id] = { 
+            name: playerName || "Guest", 
+            x: 16, y: 30, z: 16, ry: 0, rx: 0 
+        };
 
-    // Send the new player the current state of the world
-    socket.emit('currentPlayers', players);
-    
-    // Tell everyone else a new player joined
-    socket.broadcast.emit('newPlayer', { id: socket.id, player: players[socket.id] });
+        // Send them the current world state
+        socket.emit('currentPlayers', players);
+        
+        // Tell everyone else a new player joined (now includes name)
+        socket.broadcast.emit('newPlayer', { id: socket.id, player: players[socket.id] });
+    });
 
     // Listen for movement and broadcast to others
     socket.on('move', (data) => {
