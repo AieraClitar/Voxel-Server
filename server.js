@@ -36,7 +36,13 @@ io.on('connection', (socket) => {
     // Listen for movement and broadcast to others
     socket.on('move', (data) => {
         if(players[socket.id]) {
-            players[socket.id] = data;
+            // ✨ BUG FIX: Update coordinates, but PRESERVE the name!
+            players[socket.id].x = data.x;
+            players[socket.id].y = data.y;
+            players[socket.id].z = data.z;
+            players[socket.id].ry = data.ry;
+            players[socket.id].rx = data.rx;
+            
             socket.broadcast.emit('playerMoved', { id: socket.id, ...data });
         }
     });
