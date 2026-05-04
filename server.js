@@ -27,7 +27,7 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     let elevation = Math.floor((noise.getNoise(x * 0.015, z * 0.015) + 1) * 8 + rough.getNoise(x * 0.06, z * 0.06) * 3) + 2;
     
     if (y <= elevation) return 'stone';
-    if (y > elevation && y <= elevation + 5 && trees.getNoise(x * 0.02, z * 0.02) > 0.1 && Math.abs(trees.random(x, z)) < 0.03) return 'wood'; // Tree trunk approximation
+    if (y > elevation && y <= elevation + 5 && trees.getNoise(x * 0.02, z * 0.02) > 0.1 && Math.abs(trees.random(x, z)) < 0.03) return 'wood'; 
     return 'air';
 }
 
@@ -40,6 +40,7 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     return true;
 }
 
+// ✨ FIX: Calculates true ground including placed blocks and trees
 function getTrueSurfaceY(x, z, seed, customBlocks) {
     for(let y = 60; y >= -10; y--) {
         if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y;
@@ -70,30 +71,41 @@ io.on('connection', (socket) => {
     }
 
     socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
+    
+    // ✨ FIX: Properly caching and broadcasting block types for Audio/Particles
     socket.on('requestBlockBreak', (data) => {
         const room = sessions[socket.roomId]; if (!room) return; const key = `${data.x},${data.y},${data.z}`;
-        if (room.blocks[key] === 'air') return; 
-        room.blocks[key] = 'air'; socket.broadcast.to(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z });
-        const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: data.type };
+        const actualType = room.blocks[key] || data.type; 
+        if (actualType === 'air') return; 
+        
+        room.blocks[key] = 'air'; 
+        io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType });
+        
+        const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType };
         room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
     });
+    
     socket.on('requestBlockPlace', (data) => {
         const room = sessions[socket.roomId]; if (!room) return; const key = `${data.x},${data.y},${data.z}`;
-        room.blocks[key] = data.type; socket.broadcast.to(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type });
+        room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type });
     });
+    
     socket.on('requestDropItem', (data) => {
         const room = sessions[socket.roomId]; if (!room) return;
         const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data };
         room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
     });
+    
     socket.on('requestPickup', (dropId) => {
         const room = sessions[socket.roomId];
         if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); }
     });
+    
     socket.on('requestPlayerDamage', (data) => {
         const room = sessions[socket.roomId];
         if (room && room.players[socket.id]) { room.players[socket.id].health -= data.dmg; io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: data.dmg, source: data.source }); }
     });
+    
     socket.on('requestMobAttack', (data) => {
         const room = sessions[socket.roomId];
         if (room && room.mobs[data.id]) {
@@ -101,7 +113,9 @@ io.on('connection', (socket) => {
             if (room.mobs[data.id].health <= 0) { const mobType = room.mobs[data.id].type.toUpperCase(); delete room.mobs[data.id]; io.in(socket.roomId).emit('mobKilled', { mobId: data.id, killerName: room.players[socket.id].name, mobType: mobType }); }
         }
     });
+    
     socket.on('playerRespawn', () => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) sessions[socket.roomId].players[socket.id].health = 100; });
+    
     socket.on('disconnect', () => {
         if(socket.roomId && sessions[socket.roomId]) {
             delete sessions[socket.roomId].players[socket.id]; socket.to(socket.roomId).emit('playerDisconnected', socket.id);
@@ -124,7 +138,7 @@ setInterval(() => {
             const mx = targetPlayer.x + Math.cos(angle) * dist; const mz = targetPlayer.z + Math.sin(angle) * dist;
             let my = getTrueSurfaceY(mx, mz, room.seed, room.blocks);
 
-            if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air') { // Validate Spawn
+            if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air') { 
                 const id = 'mob_' + globalIdCounter++; const isZombie = Math.random() > 0.5; const faceVar = Math.random();
                 const faceType = isZombie ? (faceVar < 0.3 ? 'zombie_face_var1' : faceVar < 0.6 ? 'zombie_face_var2' : 'zombie_face') : (faceVar < 0.5 ? 'archer_face_var1' : 'archer_face');
                 room.mobs[id] = { 
@@ -163,15 +177,12 @@ setInterval(() => {
             let los = closestPlayer ? hasLineOfSight(mob.x, mob.y+1, mob.z, closestPlayer.x, closestPlayer.y+1, closestPlayer.z, room.seed, room.blocks) : false;
 
             if (mob.isBurning && !closestPlayer) {
-                // Seek shade
                 mob.ry += 0.5; mob.x += Math.sin(mob.ry) * 0.2; mob.z += Math.cos(mob.ry) * 0.2; mob.isMoving = true;
             } else if (closestPlayer && minD < 30 && los) {
-                // Chase
                 const angle = Math.atan2(closestPlayer.x - mob.x, closestPlayer.z - mob.z); mob.ry = angle;
                 
-                // Obstacle Avoidance (Steer)
                 let frontBlock = getBlockAt(mob.x + Math.sin(angle), mob.y, mob.z + Math.cos(angle), room.seed, room.blocks);
-                if (frontBlock !== 'air') { mob.x += Math.sin(angle + Math.PI/4) * 0.15; mob.z += Math.cos(angle + Math.PI/4) * 0.15; } // Step sideways
+                if (frontBlock !== 'air') { mob.x += Math.sin(angle + Math.PI/4) * 0.15; mob.z += Math.cos(angle + Math.PI/4) * 0.15; } 
                 else {
                     if (mob.type === 'zombie') {
                         if (minD > 1.8) { mob.x += Math.sin(angle) * 0.18; mob.z += Math.cos(angle) * 0.18; mob.isMoving = true; mob.isAttacking = false; } 
@@ -186,13 +197,11 @@ setInterval(() => {
                     }
                 }
             } else { 
-                // Idle / Wander
                 if(Math.random() < 0.02) mob.ry = Math.random() * Math.PI * 2;
                 if(Math.random() < 0.5) { mob.x += Math.sin(mob.ry) * 0.05; mob.z += Math.cos(mob.ry) * 0.05; mob.isMoving = true; } else mob.isMoving = false;
                 mob.isAttacking = false; 
             }
             
-            // Ground Gravity Tracking
             let elevation = getTrueSurfaceY(mob.x, mob.z, room.seed, room.blocks); 
             mob.y = elevation + 1.0; 
         }
