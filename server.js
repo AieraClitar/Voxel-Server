@@ -8,26 +8,22 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 
 class SimpleNoise {
     constructor(seed = 1) { this.seed = seed; }
-    random(x, z) { let n = Math.floor(x) * 331 + Math.floor(z) * 337 + this.seed; n = (n << 13) ^ n; return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0); }
+    random(x, z) { 
+        const sin = Math.sin(Math.floor(x) * 12.9898 + Math.floor(z) * 78.233 + this.seed) * 43758.5453;
+        return sin - Math.floor(sin);
+    }
     getNoise(x, z) {
         const intX = Math.floor(x); const intZ = Math.floor(z); const fractX = x - intX; const fractZ = z - intZ;
         const v1 = this.random(intX, intZ); const v2 = this.random(intX + 1, intZ); const v3 = this.random(intX, intZ + 1); const v4 = this.random(intX + 1, intZ + 1);
-        const i1 = v1 * (1 - fractX) + v2 * fractX; const i2 = v3 * (1 - fractX) + v4 * fractX;
-        return i1 * (1 - fractZ) + i2 * fractZ;
+        const fX = (1 - Math.cos(fractX * Math.PI)) * 0.5; const fZ = (1 - Math.cos(fractZ * Math.PI)) * 0.5;
+        const i1 = v1 * (1 - fX) + v2 * fX; const i2 = v3 * (1 - fX) + v4 * fX;
+        return (i1 * (1 - fZ) + i2 * fZ) * 2.0 - 1.0;
     }
 }
 
-// MUST match World.js exactly
-const Y_OFFSET = 30; 
-const WATER_LEVEL = 5;
-
-// ✨ THE FIX: We must calculate elevation exactly as the client builds the chunk array, THEN apply the offset.
+// ✨ THE FIX: The Server now mirrors World.js perfectly, including Caves.
 function getBlockAt(x, y, z, seed, customBlocks) {
-    const bx = Math.floor(x); 
-    const by = Math.floor(y); 
-    const bz = Math.floor(z);
-    
-    // Check Custom Blocks First (Player placed/broken)
+    const bx = Math.floor(x); const by = Math.floor(y); const bz = Math.floor(z);
     const key = `${bx},${by},${bz}`;
     if (customBlocks[key]) return customBlocks[key];
     
@@ -35,25 +31,24 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     const rough = new SimpleNoise(seed + 1337); 
     const trees = new SimpleNoise(seed + 888);
     const tempMap = new SimpleNoise(seed + 555);
+    const humidMap = new SimpleNoise(seed + 999);
     
-    // 1. Calculate raw elevation (Array Index Level: 0 to 127)
-    let rawElevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
+    // Removed the broken Y_OFFSET. True 1:1 elevation.
+    let elevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
     
-    // 2. Convert World Y back to Array Y to check against raw elevation
-    let arrayY = by + Y_OFFSET; 
-    
-    // If the converted Y is below the noise floor, it's solid.
-    if (arrayY <= Math.max(rawElevation, WATER_LEVEL)) {
-        // If it's just water, mobs should fall through it for now (or swim, but let's treat as air for falling)
-        if (arrayY > rawElevation && arrayY <= WATER_LEVEL) return 'air'; // Treat water as non-solid for physics
-        return 'stone'; 
+    // Server now recognizes Caves!
+    let isCave = false;
+    if (by <= elevation && by > -30) {
+        let n1 = rough.getNoise(bx * 0.04, by * 0.04 + bz * 0.01); 
+        let n2 = humidMap.getNoise(bz * 0.04, by * 0.04 + bx * 0.01); 
+        if (Math.abs(n1) < 0.12 && Math.abs(n2) < 0.12) isCave = true;
     }
 
-    // 3. Tree check (Must happen above ground, not in Tundra)
+    if (isCave) return 'air';
+    if (by <= elevation) return 'stone';
+
     let isTundra = tempMap.getNoise(bx * 0.005, bz * 0.005) < -0.25;
-    if (!isTundra && arrayY > rawElevation && arrayY <= rawElevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) {
-        return 'wood'; 
-    }
+    if (!isTundra && by > elevation && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
     
     return 'air';
 }
@@ -81,12 +76,12 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     return true;
 }
 
-function getTrueSurfaceY(x, z, seed, customBlocks) {
-    // Start scanning from the sky (e.g. Y=30) down to the bottom of the world (e.g. Y=-30)
-    for(let y = 30; y >= -30; y--) { 
+// ✨ THE FIX: Scans dynamically down from the player so mobs spawn INSIDE caves or ON the surface accurately.
+function getTrueSurfaceY(x, startY, z, seed, customBlocks) {
+    for(let y = Math.floor(startY); y >= -30; y--) { 
         if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; 
     }
-    return -28; // Void
+    return -28; 
 }
 
 const sessions = {}; let globalIdCounter = 0;
@@ -142,7 +137,10 @@ setInterval(() => {
                 const angle = Math.random() * Math.PI * 2; 
                 const dist = 15 + Math.random() * 10; 
                 const mx = targetPlayer.x + Math.cos(angle) * dist; const mz = targetPlayer.z + Math.sin(angle) * dist;
-                let my = getTrueSurfaceY(mx, mz, room.seed, room.blocks);
+                
+                // Scan downward from slightly above the player to find the exact local surface or cave floor
+                let spawnY = targetPlayer.y + 10;
+                let my = getTrueSurfaceY(mx, spawnY, mz, room.seed, room.blocks);
 
                 if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air' && getBlockAt(mx, my+2, mz, room.seed, room.blocks) === 'air') { 
                     const id = 'mob_' + globalIdCounter++; 
@@ -154,7 +152,8 @@ setInterval(() => {
 
                     room.mobs[id] = { 
                         id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
-                        x: mx, y: my + 1.0, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false
+                        // ✨ THE FIX: Spawns perfectly flush on top of the block surface
+                        x: mx, y: my + 0.5, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false
                     };
                     room.lastSpawnTime = now; io.in(roomId).emit('mobSpawned', room.mobs[id]);
                 }
@@ -221,7 +220,6 @@ setInterval(() => {
                 mob.isAttacking = false; 
             }
 
-            // HORIZONTAL (AABB)
             mob.x += targetX;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
                 mob.x -= targetX; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
@@ -231,13 +229,13 @@ setInterval(() => {
                 mob.z -= targetZ; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
 
-            // ✨ THE FIX: True Voxel Gravity. Pits are no longer solid.
             mob.vy -= 25.0 * 0.05; 
             let nextY = mob.y + (mob.vy * 0.05);
             
             if (checkCollisionServer(mob.x, nextY, mob.z, room.seed, room.blocks)) {
                 if (mob.vy < 0) {
-                    mob.y = Math.floor(nextY) + 1.0; 
+                    // ✨ THE FIX: Perfectly flush math. Snaps exactly to Y + 0.5 (top of block). No hovering!
+                    mob.y = Math.floor(nextY) + 0.5; 
                     mob.vy = 0; mob.isGrounded = true;
                 } else {
                     mob.y = Math.floor(nextY + 1.8) - 1.8; 
@@ -248,7 +246,7 @@ setInterval(() => {
                 mob.isGrounded = false;
             }
 
-            if (minD > 45 || mob.y < -35) { 
+            if (minD > 60 || mob.y < -35) { 
                 delete room.mobs[mobId]; 
                 io.in(roomId).emit('mobDespawned', mobId); 
             }
