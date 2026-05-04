@@ -120,16 +120,40 @@ function getValidSpawnY(x, z, seed, customBlocks) {
 const sessions = {}; let globalIdCounter = 0;
 
 io.on('connection', (socket) => {
-    const broadcastLobby = () => { io.emit('lobbyUpdate', Object.keys(sessions).map(id => ({ id: id, hostName: sessions[id].hostName, playerCount: Object.keys(sessions[id].players).length }))); };
+    // ✨ MULTIPLAYER FIX: Added World Name formatting to the lobby updates
+    const broadcastLobby = () => { 
+        io.emit('lobbyUpdate', Object.keys(sessions).map(id => ({ 
+            id: id, 
+            worldName: sessions[id].worldName,
+            hostName: sessions[id].hostName, 
+            playerCount: Object.keys(sessions[id].players).length 
+        }))); 
+    };
     broadcastLobby();
 
-    socket.on('createGame', (playerName) => {
+    // ✨ MULTIPLAYER FIX: Saves the host's specific ID so the room knows who the true owner is.
+    socket.on('createGame', (data) => {
         const roomId = socket.id; 
-        sessions[roomId] = { seed: Math.floor(Math.random() * 10000), hostName: playerName || "Guest", players: {}, blocks: {}, drops: {}, mobs: {}, startTime: Date.now(), lastSpawnTime: 0 };
-        joinRoom(socket, roomId, playerName); broadcastLobby(); 
+        sessions[roomId] = { 
+            seed: Math.floor(Math.random() * 10000), 
+            hostId: socket.id, // Fixed Host Identity 
+            worldName: data.worldName || "New World", 
+            hostName: data.playerName || "Guest", 
+            players: {}, blocks: {}, drops: {}, mobs: {}, startTime: Date.now(), lastSpawnTime: 0 
+        };
+        joinRoom(socket, roomId, data.playerName); 
+        broadcastLobby(); 
     });
 
-    socket.on('joinGame', (data) => { if(sessions[data.roomId]) { joinRoom(socket, data.roomId, data.playerName); broadcastLobby(); } });
+    // ✨ MULTIPLAYER FIX: Prevents infinite loading if joining a deleted room.
+    socket.on('joinGame', (data) => { 
+        if(sessions[data.roomId]) { 
+            joinRoom(socket, data.roomId, data.playerName); 
+            broadcastLobby(); 
+        } else {
+            socket.emit('joinError', 'This world no longer exists or the host has left.');
+        }
+    });
 
     function joinRoom(socket, roomId, playerName) {
         socket.join(roomId); socket.roomId = roomId; const room = sessions[roomId];
@@ -144,19 +168,14 @@ io.on('connection', (socket) => {
     socket.on('requestDropItem', (data) => { const room = sessions[socket.roomId]; if (!room) return; const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; room.drops[dropId] = room.drops[dropId] || dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
     socket.on('requestPickup', (dropId) => { const room = sessions[socket.roomId]; if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); } });
     
-    // ✨ THE FIX: We now broadcast when a player is killed by a mob!
     socket.on('requestPlayerDamage', (data) => { 
         const room = sessions[socket.roomId]; 
         if (room && room.players[socket.id]) { 
             room.players[socket.id].health -= data.dmg; 
             io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: data.dmg, source: data.source }); 
-            
-            // Check if player died from this hit
             if (room.players[socket.id].health <= 0) {
                 const playerName = room.players[socket.id].name;
                 const deathMsg = `💀 ${playerName} was slain by a ${data.source.toUpperCase()}!`;
-                
-                // We use your client's existing chat system format to send the death message
                 io.in(socket.roomId).emit('mobKilled', { mobId: 'none', killerName: deathMsg, mobType: '' });
             }
         } 
@@ -171,7 +190,19 @@ io.on('connection', (socket) => {
     });
 
     socket.on('playerRespawn', () => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) sessions[socket.roomId].players[socket.id].health = 100; });
-    socket.on('disconnect', () => { if(socket.roomId && sessions[socket.roomId]) { delete sessions[socket.roomId].players[socket.id]; socket.to(socket.roomId).emit('playerDisconnected', socket.id); if(sessions[socket.roomId].hostId === socket.id) { socket.to(socket.roomId).emit('hostLeft'); delete sessions[socket.roomId]; } broadcastLobby(); } });
+    
+    // ✨ MULTIPLAYER FIX: Cleanly deletes the world when the specific Host ID disconnects
+    socket.on('disconnect', () => { 
+        if(socket.roomId && sessions[socket.roomId]) { 
+            delete sessions[socket.roomId].players[socket.id]; 
+            socket.to(socket.roomId).emit('playerDisconnected', socket.id); 
+            if(sessions[socket.roomId].hostId === socket.id) { 
+                socket.to(socket.roomId).emit('hostLeft'); 
+                delete sessions[socket.roomId]; // Room is cleanly removed
+            } 
+            broadcastLobby(); 
+        } 
+    });
 });
 
 setInterval(() => {
@@ -180,7 +211,6 @@ setInterval(() => {
         const room = sessions[roomId]; const playerIds = Object.keys(room.players); if (playerIds.length === 0) continue;
         const dayTime = ((now - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
-        // Count how many archers and zombies currently exist
         let currentZombies = 0;
         let currentArchers = 0;
         for (let m in room.mobs) {
@@ -189,8 +219,6 @@ setInterval(() => {
         }
 
         if (Object.keys(room.mobs).length < 25 && (now - room.lastSpawnTime > 1000)) {
-            // ✨ THE FIX: Massive spawn rate balancing.
-            // Day time: very rare spawns (0.05). Night time: normal spawns (0.4).
             const spawnChance = isDay ? 0.05 : 0.4; 
             
             if (Math.random() < spawnChance) {
@@ -205,16 +233,12 @@ setInterval(() => {
                 if (floorY !== null) { 
                     const id = 'mob_' + globalIdCounter++; 
                     
-                    // ✨ THE FIX: Balancing Mob Types.
-                    // If it's night, make sure the archer cap isn't exceeded (e.g., max 6 archers).
-                    // If it's day, heavily favor zombies since they burn up quickly.
                     let isZombie;
                     if (isDay) {
-                        isZombie = true; // Mostly zombies during the day so they can burn
+                        isZombie = true; 
                     } else {
-                        // At night, only spawn archer if there are fewer than 6 alive, otherwise force zombie
                         if (currentArchers < 6) {
-                            isZombie = Math.random() > 0.35; // 35% chance for archer at night
+                            isZombie = Math.random() > 0.35; 
                         } else {
                             isZombie = true; 
                         }
@@ -280,17 +304,12 @@ setInterval(() => {
                         if (mob.attackTimer <= 0) { 
                             mob.attackTimer = 1.5; mob.isAttacking = true; 
                             let dmg = 10; if(mob.weapon.includes('sword')) dmg = 25; else if(mob.weapon.includes('axe')) dmg = 20; else if(mob.weapon !== 'none') dmg = 15;
-                            // ✨ FIX: Request damage exactly as it triggers the death broadcast check above
                             room.players[closestPlayer.id].health -= dmg; 
-                            
-                            // Send standard damage packet (which triggers local screen shake)
                             io.in(roomId).emit('playerDamaged', { id: closestPlayer.id, dmg: dmg, source: 'Zombie' }); 
                             
-                            // Immediately check and broadcast death feed
                             if (room.players[closestPlayer.id].health <= 0) {
                                 io.in(roomId).emit('mobKilled', { mobId: 'none', killerName: `💀 ${room.players[closestPlayer.id].name} was mauled by a ZOMBIE!`, mobType: '' });
                             }
-
                         } else mob.isAttacking = false;
                     }
                 } else if (mob.type === 'archer') {
