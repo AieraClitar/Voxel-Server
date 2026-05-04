@@ -46,20 +46,29 @@ function getBlockAt(x, y, z, seed, customBlocks) {
 
     if (isCave) return 'air';
     
-    if (by > elevation && by <= 5) return (biome === 'tundra' && by === 5) ? 'ice' : 'water';
+    // ✨ THE FIX: Everything above elevation is processed here so the sky is explicitly AIR.
+    if (by > elevation) {
+        if (by <= 5) return (biome === 'tundra' && by === 5) ? 'ice' : 'water';
+        
+        let isTundra = biome === 'tundra';
+        if (!isTundra && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
+        
+        return 'air'; // This single line fixes the entire surface spawner.
+    }
+
+    // Exactly at the surface
     if (by === elevation) {
         if (elevation < 5) return 'dirt'; 
         if (biome === 'desert') return 'sand';
         if (biome === 'tundra') return 'snow';
         return elevation <= 6 ? 'sand' : 'grass';
     }
-    if (by > elevation - 3 && by !== -30) return biome === 'desert' ? 'sand' : 'dirt';
-    if (by <= elevation) return 'stone';
-
-    let isTundra = biome === 'tundra';
-    if (!isTundra && by > elevation && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
     
-    return 'air';
+    // Sub-surface layer
+    if (by > elevation - 3 && by !== -30) return biome === 'desert' ? 'sand' : 'dirt';
+    
+    // Deep underground
+    return 'stone';
 }
 
 function checkCollisionServer(x, y, z, seed, customBlocks) {
@@ -94,19 +103,16 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     return true;
 }
 
-// ✨ THE FIX: Explicitly ignores leaves when looking for a spawn floor.
 function getValidSpawnY(x, z, seed, customBlocks) {
     let validFloors = [];
     for (let y = -28; y <= 60; y++) {
         const type = getBlockAt(x, y, z, seed, customBlocks);
         
-        // Find a solid ground block
         if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves' && type !== 'wood') {
             
             const blockAbove1 = getBlockAt(x, y + 1, z, seed, customBlocks);
             const blockAbove2 = getBlockAt(x, y + 2, z, seed, customBlocks);
             
-            // Allow spawns even if they are under leaves
             if ((blockAbove1 === 'air' || blockAbove1 === 'torch' || blockAbove1 === 'leaves') && 
                 (blockAbove2 === 'air' || blockAbove2 === 'torch' || blockAbove2 === 'leaves')) {
                 validFloors.push(y);
@@ -115,11 +121,10 @@ function getValidSpawnY(x, z, seed, customBlocks) {
     }
     
     if (validFloors.length > 0) {
-        // Highly bias towards the surface (the highest valid floor)
         if (Math.random() > 0.3) {
-            return validFloors[validFloors.length - 1]; // Pick the highest floor
+            return validFloors[validFloors.length - 1]; // Highly favor spawning on the highest surface
         }
-        return validFloors[Math.floor(Math.random() * validFloors.length)]; // Randomly pick a cave
+        return validFloors[Math.floor(Math.random() * validFloors.length)]; 
     }
     return null;
 }
@@ -243,7 +248,6 @@ setInterval(() => {
                         } else mob.isAttacking = false;
                     }
                 } else if (mob.type === 'archer') {
-                    // ✨ SMART ARCHERS: They back up if you get too close (under 6 blocks) and approach if you are far (over 12 blocks)
                     if (minD > 12.0) { 
                         targetX = Math.sin(angle) * mobSpeed * 0.05; targetZ = Math.cos(angle) * mobSpeed * 0.05; mob.isMoving = true; mob.isAttacking = false; 
                     } else if (minD < 6.0) { 
@@ -267,12 +271,10 @@ setInterval(() => {
                 mob.isAttacking = false; 
             }
 
-            // ✨ PATHFINDING FIX: Jump over blocks if walking into a wall
             mob.x += targetX;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
                 mob.x -= targetX; 
                 if (mob.isGrounded && mob.isMoving) {
-                    // Check if the block above the wall is empty. If yes, JUMP!
                     if (!checkCollisionServer(mob.x + targetX, mob.y + 1.5, mob.z, room.seed, room.blocks)) {
                         mob.vy = 8.5; mob.isGrounded = false;
                     }
