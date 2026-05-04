@@ -18,20 +18,25 @@ class SimpleNoise {
     }
 }
 
+// ✨ Y_OFFSET FIX: The Server must know the client shifts everything down by 30!
+const Y_OFFSET = 30;
+
 function getBlockAt(x, y, z, seed, customBlocks) {
     const bx = Math.floor(x); const by = Math.floor(y); const bz = Math.floor(z);
     const key = `${bx},${by},${bz}`;
     if (customBlocks[key]) return customBlocks[key];
     
     const noise = new SimpleNoise(seed); const rough = new SimpleNoise(seed + 1337); const trees = new SimpleNoise(seed + 888);
-    let elevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
+    // Calculate raw array elevation
+    let rawElevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
+    // Apply Client Offset
+    let trueElevation = rawElevation - Y_OFFSET;
     
-    if (by <= elevation) return 'stone';
-    if (by > elevation && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
+    if (by <= trueElevation) return 'stone';
+    if (by > trueElevation && by <= trueElevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
     return 'air';
 }
 
-// ✨ REAL SERVER COLLISION PHYSICS
 function checkCollisionServer(x, y, z, seed, customBlocks) {
     const radius = 0.3; const feetY = y; const headY = y + 1.6;
     const pMinX = Math.floor(x - radius); const pMaxX = Math.floor(x + radius);
@@ -48,7 +53,6 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
     return false;
 }
 
-// ✨ FIXED LINE OF SIGHT (Checks from Head to Head)
 function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     let dist = Math.sqrt(Math.pow(x2-x1, 2) + Math.pow(y2-y1, 2) + Math.pow(z2-z1, 2));
     let dx = (x2-x1)/dist; let dy = (y2-y1)/dist; let dz = (z2-z1)/dist;
@@ -59,8 +63,11 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
 }
 
 function getTrueSurfaceY(x, z, seed, customBlocks) {
-    for(let y = 60; y >= -20; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
-    return 2;
+    // Search downward from the sky (30 blocks above 0) to bedrock (-30)
+    for(let y = 30; y >= -30; y--) { 
+        if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; 
+    }
+    return -28; // Default floor
 }
 
 const sessions = {}; 
@@ -89,6 +96,7 @@ io.on('connection', (socket) => {
     }
 
     socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
+    
     socket.on('requestBlockBreak', (data) => {
         const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`;
         const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; 
@@ -96,17 +104,24 @@ io.on('connection', (socket) => {
         const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType };
         room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
     });
+    
     socket.on('requestBlockPlace', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); });
     socket.on('requestDropItem', (data) => { const room = sessions[socket.roomId]; if (!room) return; const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
     socket.on('requestPickup', (dropId) => { const room = sessions[socket.roomId]; if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); } });
     socket.on('requestPlayerDamage', (data) => { const room = sessions[socket.roomId]; if (room && room.players[socket.id]) { room.players[socket.id].health -= data.dmg; io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: data.dmg, source: data.source }); } });
+    
     socket.on('requestMobAttack', (data) => {
         const room = sessions[socket.roomId];
         if (room && room.mobs[data.id]) {
             room.mobs[data.id].health -= data.dmg; io.in(socket.roomId).emit('mobDamaged', { id: data.id, kbDir: data.kbDir });
-            if (room.mobs[data.id].health <= 0) { const mobType = room.mobs[data.id].type.toUpperCase(); delete room.mobs[data.id]; io.in(socket.roomId).emit('mobKilled', { mobId: data.id, killerName: room.players[socket.id].name, mobType: mobType }); }
+            if (room.mobs[data.id].health <= 0) { 
+                const mobType = room.mobs[data.id].type.toUpperCase(); delete room.mobs[data.id]; 
+                // ✨ FIX: Strict separation of Player Kills vs Despawns
+                io.in(socket.roomId).emit('mobKilled', { mobId: data.id, killerName: room.players[socket.id].name, mobType: mobType }); 
+            }
         }
     });
+
     socket.on('playerRespawn', () => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) sessions[socket.roomId].players[socket.id].health = 100; });
     socket.on('disconnect', () => {
         if(socket.roomId && sessions[socket.roomId]) {
@@ -117,7 +132,6 @@ io.on('connection', (socket) => {
     });
 });
 
-// ✨ 20 TPS SERVER PHYSICS LOOP
 setInterval(() => {
     const now = Date.now();
     for (let roomId in sessions) {
@@ -169,11 +183,11 @@ setInterval(() => {
                 mob.isBurning = true; 
                 if (Math.random() < 0.1) {
                     mob.health -= 5; io.in(roomId).emit('mobDamaged', { id: mob.id, kbDir: {x:0, y:0, z:0} });
-                    if (mob.health <= 0) { io.in(roomId).emit('mobKilled', { mobId: mob.id, killerName: 'The Sun', mobType: 'ZOMBIE' }); delete room.mobs[mobId]; continue; }
+                    if (mob.health <= 0) { io.in(roomId).emit('mobDespawned', mobId); delete room.mobs[mobId]; continue; }
                 }
             }
 
-            // ✨ TRUE AABB PHYSICS ENGINE (Collision & Gravity)
+            // PHYSICS & COLLISION
             let targetX = 0, targetZ = 0;
             let los = closestPlayer ? hasLineOfSight(mob.x, mob.y + 1.5, mob.z, closestPlayer.x, closestPlayer.y + 1.5, closestPlayer.z, room.seed, room.blocks) : false;
 
@@ -208,27 +222,27 @@ setInterval(() => {
                 mob.isAttacking = false; 
             }
 
-            // APPLY HORIZONTAL COLLISION (AABB)
+            // HORIZONTAL (AABB)
             mob.x += targetX;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
-                mob.x -= targetX; // Revert X
-                if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } // Jump over obstacle
+                mob.x -= targetX; 
+                if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
             mob.z += targetZ;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
-                mob.z -= targetZ; // Revert Z
-                if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } // Jump over obstacle
+                mob.z -= targetZ; 
+                if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
 
-            // APPLY VERTICAL GRAVITY (AABB)
+            // VERTICAL (AABB)
             mob.vy -= 25.0 * 0.05; 
             let nextY = mob.y + (mob.vy * 0.05);
             if (checkCollisionServer(mob.x, nextY, mob.z, room.seed, room.blocks)) {
                 if (mob.vy < 0) {
-                    mob.y = Math.floor(nextY) + 1.0; // Snap exactly to floor
+                    mob.y = Math.floor(nextY) + 1.0; 
                     mob.vy = 0; mob.isGrounded = true;
                 } else {
-                    mob.y = Math.floor(nextY + 1.8) - 1.8; // Bonk head on ceiling
+                    mob.y = Math.floor(nextY + 1.8) - 1.8; 
                     mob.vy = 0; mob.isGrounded = false;
                 }
             } else {
@@ -236,8 +250,11 @@ setInterval(() => {
                 mob.isGrounded = false;
             }
 
-            // ✨ SILENT DESPAWN (Fixes Chat Spam)
-            if (minD > 45 || mob.y < -30) { delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); }
+            // ✨ SILENT DESPAWN: Completely removes Chat Spam
+            if (minD > 45 || mob.y < -35) { 
+                delete room.mobs[mobId]; 
+                io.in(roomId).emit('mobDespawned', mobId); 
+            }
         }
         io.in(roomId).emit('server_tick', { players: room.players, mobs: room.mobs });
     }
