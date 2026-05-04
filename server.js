@@ -65,16 +65,10 @@ function getBlockAt(x, y, z, seed, customBlocks) {
 }
 
 function checkCollisionServer(x, y, z, seed, customBlocks) {
-    const radius = 0.25; 
-    const feetY = y; 
-    const headY = y + 1.7; 
-    
-    const pMinX = Math.floor(x - radius + 0.5); 
-    const pMaxX = Math.floor(x + radius + 0.5); 
-    const pMinY = Math.floor(feetY + 0.5); 
-    const pMaxY = Math.floor(headY + 0.5); 
-    const pMinZ = Math.floor(z - radius + 0.5); 
-    const pMaxZ = Math.floor(z + radius + 0.5);
+    const radius = 0.25; const feetY = y; const headY = y + 1.7; 
+    const pMinX = Math.floor(x - radius + 0.5); const pMaxX = Math.floor(x + radius + 0.5); 
+    const pMinY = Math.floor(feetY + 0.5); const pMaxY = Math.floor(headY + 0.5); 
+    const pMinZ = Math.floor(z - radius + 0.5); const pMaxZ = Math.floor(z + radius + 0.5);
     
     for (let bx = pMinX; bx <= pMaxX; bx++) {
         for (let by = pMinY; by <= pMaxY; by++) {
@@ -109,7 +103,6 @@ function getValidSpawnY(x, z, seed, customBlocks) {
             }
         }
     }
-    
     if (validFloors.length > 0) {
         if (Math.random() > 0.3) return validFloors[validFloors.length - 1]; 
         return validFloors[Math.floor(Math.random() * validFloors.length)]; 
@@ -117,10 +110,12 @@ function getValidSpawnY(x, z, seed, customBlocks) {
     return null;
 }
 
-const sessions = {}; let globalIdCounter = 0;
+// ✨ SERVER DATABASE: Stores inactive worlds and player progress
+const savedWorlds = {}; 
+const sessions = {}; 
+let globalIdCounter = 0;
 
 io.on('connection', (socket) => {
-    // ✨ MULTIPLAYER FIX: Added World Name formatting to the lobby updates
     const broadcastLobby = () => { 
         io.emit('lobbyUpdate', Object.keys(sessions).map(id => ({ 
             id: id, 
@@ -131,21 +126,39 @@ io.on('connection', (socket) => {
     };
     broadcastLobby();
 
-    // ✨ MULTIPLAYER FIX: Saves the host's specific ID so the room knows who the true owner is.
+    // ✨ LOAD MENU REQUEST
+    socket.on('requestSavedWorlds', () => {
+        socket.emit('savedWorldsList', Object.keys(savedWorlds));
+    });
+
     socket.on('createGame', (data) => {
         const roomId = socket.id; 
+        const wName = data.worldName || "New World";
+        
+        let seed = Math.floor(Math.random() * 10000);
+        let blocks = {};
+        let savedPlayers = {};
+
+        // ✨ RESTORE WORLD DATA IF IT EXISTS
+        if (savedWorlds[wName]) {
+            seed = savedWorlds[wName].seed;
+            blocks = JSON.parse(JSON.stringify(savedWorlds[wName].blocks));
+            savedPlayers = savedWorlds[wName].players || {};
+            delete savedWorlds[wName]; // Remove from inactive list while it's being hosted
+        }
+
         sessions[roomId] = { 
-            seed: Math.floor(Math.random() * 10000), 
-            hostId: socket.id, // Fixed Host Identity 
-            worldName: data.worldName || "New World", 
+            seed: seed, 
+            hostId: socket.id, 
+            worldName: wName, 
             hostName: data.playerName || "Guest", 
-            players: {}, blocks: {}, drops: {}, mobs: {}, startTime: Date.now(), lastSpawnTime: 0 
+            players: {}, blocks: blocks, drops: {}, mobs: {}, startTime: Date.now(), lastSpawnTime: 0,
+            savedPlayers: savedPlayers // Loads the "database" of player accounts into active memory
         };
         joinRoom(socket, roomId, data.playerName); 
         broadcastLobby(); 
     });
 
-    // ✨ MULTIPLAYER FIX: Prevents infinite loading if joining a deleted room.
     socket.on('joinGame', (data) => { 
         if(sessions[data.roomId]) { 
             joinRoom(socket, data.roomId, data.playerName); 
@@ -157,10 +170,52 @@ io.on('connection', (socket) => {
 
     function joinRoom(socket, roomId, playerName) {
         socket.join(roomId); socket.roomId = roomId; const room = sessions[roomId];
-        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: 10, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
+        
+        // ✨ PROGRESSION FIX: Load specific player state if they have played here before
+        let px = 16, py = 10, pz = 16;
+        let pHealth = 100;
+        let hasSavedData = false;
+        let savedInv = null;
+
+        if (room.savedPlayers && room.savedPlayers[playerName]) {
+            const sp = room.savedPlayers[playerName];
+            px = sp.x; py = sp.y; pz = sp.z; pHealth = sp.health;
+            savedInv = sp.inventory;
+            hasSavedData = true;
+        }
+
+        room.players[socket.id] = { name: playerName || "Guest", x: px, y: py, z: pz, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: pHealth };
+        
         socket.emit('world_snapshot', { seed: room.seed, players: room.players, blocks: room.blocks, drops: room.drops, mobs: room.mobs, ageInSeconds: (Date.now() - room.startTime) / 1000, isHost: socket.id === room.hostId });
+        
+        if (hasSavedData) {
+            socket.emit('restore_player_data', { inventory: savedInv, x: px, y: py, z: pz, health: pHealth });
+        }
+
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
+
+    // ✨ SAVE & EXIT LOGIC
+    socket.on('saveAndExit', (data) => {
+        const room = sessions[socket.roomId];
+        if (!room) return;
+
+        const wName = room.worldName;
+        if (!savedWorlds[wName]) savedWorlds[wName] = { seed: room.seed, blocks: {}, players: {} };
+        
+        // Save the map
+        savedWorlds[wName].blocks = JSON.parse(JSON.stringify(room.blocks));
+        
+        // Save the player to the database
+        savedWorlds[wName].players[data.playerName] = {
+            inventory: data.inventory,
+            x: data.x, y: data.y, z: data.z,
+            health: data.health
+        };
+
+        // Also save to active memory in case they immediately rejoin
+        room.savedPlayers[data.playerName] = savedWorlds[wName].players[data.playerName];
+    });
 
     socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
     socket.on('requestBlockBreak', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
@@ -191,14 +246,21 @@ io.on('connection', (socket) => {
 
     socket.on('playerRespawn', () => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) sessions[socket.roomId].players[socket.id].health = 100; });
     
-    // ✨ MULTIPLAYER FIX: Cleanly deletes the world when the specific Host ID disconnects
     socket.on('disconnect', () => { 
         if(socket.roomId && sessions[socket.roomId]) { 
             delete sessions[socket.roomId].players[socket.id]; 
             socket.to(socket.roomId).emit('playerDisconnected', socket.id); 
+            
+            // ✨ MULTIPLAYER FIX: Cleanly handles host disconnecting
             if(sessions[socket.roomId].hostId === socket.id) { 
+                
+                const wName = sessions[socket.roomId].worldName;
+                if (!savedWorlds[wName]) savedWorlds[wName] = { seed: sessions[socket.roomId].seed, blocks: {}, players: {} };
+                savedWorlds[wName].blocks = JSON.parse(JSON.stringify(sessions[socket.roomId].blocks));
+                savedWorlds[wName].players = sessions[socket.roomId].savedPlayers; // Push the active memory back to the database
+
                 socket.to(socket.roomId).emit('hostLeft'); 
-                delete sessions[socket.roomId]; // Room is cleanly removed
+                delete sessions[socket.roomId]; // Kill the active room
             } 
             broadcastLobby(); 
         } 
@@ -211,8 +273,7 @@ setInterval(() => {
         const room = sessions[roomId]; const playerIds = Object.keys(room.players); if (playerIds.length === 0) continue;
         const dayTime = ((now - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
-        let currentZombies = 0;
-        let currentArchers = 0;
+        let currentZombies = 0; let currentArchers = 0;
         for (let m in room.mobs) {
             if (room.mobs[m].type === 'zombie') currentZombies++;
             else if (room.mobs[m].type === 'archer') currentArchers++;
@@ -232,17 +293,8 @@ setInterval(() => {
 
                 if (floorY !== null) { 
                     const id = 'mob_' + globalIdCounter++; 
-                    
                     let isZombie;
-                    if (isDay) {
-                        isZombie = true; 
-                    } else {
-                        if (currentArchers < 6) {
-                            isZombie = Math.random() > 0.35; 
-                        } else {
-                            isZombie = true; 
-                        }
-                    }
+                    if (isDay) { isZombie = true; } else { if (currentArchers < 6) { isZombie = Math.random() > 0.35; } else { isZombie = true; } }
 
                     const faceType = isZombie ? 'zombie_face' : 'archer_face';
                     const zombieWeapons = ['none', 'wooden_sword', 'stone_sword', 'wooden_axe', 'stone_pickaxe', 'wooden_shovel'];
@@ -270,8 +322,7 @@ setInterval(() => {
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
             const mobSpeed = mob.type === 'zombie' ? 2.5 : 2.0; 
 
-            mob.isBurning = false; 
-            let hasRoof = false;
+            mob.isBurning = false; let hasRoof = false;
             
             for(let ty = Math.floor(mob.y) + 2; ty < Math.floor(mob.y) + 30; ty++) { 
                 if(getBlockAt(mob.x, ty, mob.z, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } 
@@ -281,9 +332,7 @@ setInterval(() => {
                 mob.isBurning = true; 
                 if (Math.random() < 0.1) {
                     mob.health -= 5; io.in(roomId).emit('mobDamaged', { id: mob.id, kbDir: {x:0, y:0, z:0} });
-                    if (mob.health <= 0) { 
-                        delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); continue; 
-                    }
+                    if (mob.health <= 0) { delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); continue; }
                 }
             }
 
@@ -367,18 +416,11 @@ setInterval(() => {
                 mob.y += yStepAmt;
                 if (mob.vy < 0) { 
                     if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        mob.y -= yStepAmt; 
-                        mob.y = Math.floor(mob.y - 0.001) + 0.5; 
-                        mob.vy = 0; mob.isGrounded = true; 
-                        break; 
-                    } else { 
-                        mob.isGrounded = false; 
-                    } 
+                        mob.y -= yStepAmt; mob.y = Math.floor(mob.y - 0.001) + 0.5; mob.vy = 0; mob.isGrounded = true; break; 
+                    } else { mob.isGrounded = false; } 
                 } else if (mob.vy > 0) { 
                     if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        mob.y -= yStepAmt; 
-                        mob.vy = 0; 
-                        break; 
+                        mob.y -= yStepAmt; mob.vy = 0; break; 
                     } 
                 }
             }
@@ -391,8 +433,7 @@ setInterval(() => {
             }
 
             if (nearestDistToAnyPlayer > 60 || mob.y < -35) { 
-                delete room.mobs[mobId]; 
-                io.in(roomId).emit('mobDespawned', mobId); 
+                delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); 
             }
         }
         io.in(roomId).emit('server_tick', { players: room.players, mobs: room.mobs });
