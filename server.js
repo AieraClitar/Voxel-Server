@@ -110,7 +110,6 @@ function getValidSpawnY(x, z, seed, customBlocks) {
     return null;
 }
 
-// ✨ SERVER DATABASE: Stores inactive worlds and player progress
 const savedWorlds = {}; 
 const sessions = {}; 
 let globalIdCounter = 0;
@@ -118,15 +117,11 @@ let globalIdCounter = 0;
 io.on('connection', (socket) => {
     const broadcastLobby = () => { 
         io.emit('lobbyUpdate', Object.keys(sessions).map(id => ({ 
-            id: id, 
-            worldName: sessions[id].worldName,
-            hostName: sessions[id].hostName, 
-            playerCount: Object.keys(sessions[id].players).length 
+            id: id, worldName: sessions[id].worldName, hostName: sessions[id].hostName, playerCount: Object.keys(sessions[id].players).length 
         }))); 
     };
     broadcastLobby();
 
-    // ✨ LOAD MENU REQUEST
     socket.on('requestSavedWorlds', () => {
         socket.emit('savedWorldsList', Object.keys(savedWorlds));
     });
@@ -134,28 +129,39 @@ io.on('connection', (socket) => {
     socket.on('createGame', (data) => {
         const roomId = socket.id; 
         const wName = data.worldName || "New World";
+        const passcode = data.passcode;
         
         let seed = Math.floor(Math.random() * 10000);
         let blocks = {};
         let savedPlayers = {};
+        let hostName = data.playerName || "Guest";
 
-        // ✨ RESTORE WORLD DATA IF IT EXISTS
+        // ✨ THE FIX: PASSCODE VALIDATION AND HOST NAME OVERRIDE
         if (savedWorlds[wName]) {
+            if (savedWorlds[wName].passcode !== passcode) {
+                socket.emit('hostError', 'Incorrect Passcode for this saved world!');
+                return;
+            }
             seed = savedWorlds[wName].seed;
             blocks = JSON.parse(JSON.stringify(savedWorlds[wName].blocks));
             savedPlayers = savedWorlds[wName].players || {};
-            delete savedWorlds[wName]; // Remove from inactive list while it's being hosted
+            
+            // Force the player to use their original host name
+            hostName = savedWorlds[wName].hostName; 
+            delete savedWorlds[wName]; 
         }
 
         sessions[roomId] = { 
             seed: seed, 
             hostId: socket.id, 
             worldName: wName, 
-            hostName: data.playerName || "Guest", 
+            hostName: hostName, 
+            passcode: passcode, // Keep active to save later
             players: {}, blocks: blocks, drops: {}, mobs: {}, startTime: Date.now(), lastSpawnTime: 0,
-            savedPlayers: savedPlayers // Loads the "database" of player accounts into active memory
+            savedPlayers: savedPlayers 
         };
-        joinRoom(socket, roomId, data.playerName); 
+        
+        joinRoom(socket, roomId, hostName); 
         broadcastLobby(); 
     });
 
@@ -171,12 +177,12 @@ io.on('connection', (socket) => {
     function joinRoom(socket, roomId, playerName) {
         socket.join(roomId); socket.roomId = roomId; const room = sessions[roomId];
         
-        // ✨ PROGRESSION FIX: Load specific player state if they have played here before
         let px = 16, py = 10, pz = 16;
         let pHealth = 100;
         let hasSavedData = false;
         let savedInv = null;
 
+        // ✨ THE FIX: Instantly restores joiners' items if they use their old name
         if (room.savedPlayers && room.savedPlayers[playerName]) {
             const sp = room.savedPlayers[playerName];
             px = sp.x; py = sp.y; pz = sp.z; pHealth = sp.health;
@@ -195,7 +201,7 @@ io.on('connection', (socket) => {
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
 
-    // ✨ SAVE & EXIT LOGIC
+    // ✨ THE FIX: FORCE KICK ON SAVE AND EXIT
     socket.on('saveAndExit', (data) => {
         const room = sessions[socket.roomId];
         if (!room) return;
@@ -203,18 +209,22 @@ io.on('connection', (socket) => {
         const wName = room.worldName;
         if (!savedWorlds[wName]) savedWorlds[wName] = { seed: room.seed, blocks: {}, players: {} };
         
-        // Save the map
+        savedWorlds[wName].passcode = room.passcode;
+        savedWorlds[wName].hostName = room.hostName;
         savedWorlds[wName].blocks = JSON.parse(JSON.stringify(room.blocks));
         
-        // Save the player to the database
         savedWorlds[wName].players[data.playerName] = {
-            inventory: data.inventory,
-            x: data.x, y: data.y, z: data.z,
-            health: data.health
+            inventory: data.inventory, x: data.x, y: data.y, z: data.z, health: data.health
         };
 
-        // Also save to active memory in case they immediately rejoin
-        room.savedPlayers[data.playerName] = savedWorlds[wName].players[data.playerName];
+        // Kicks all other players back to the menu
+        socket.to(socket.roomId).emit('hostLeft', 'The Host has saved and closed the world.');
+        
+        // Tells the host they successfully saved and can go back to menu
+        socket.emit('hostLeft', 'World Saved Successfully.'); 
+        
+        delete sessions[socket.roomId];
+        broadcastLobby();
     });
 
     socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
@@ -236,11 +246,19 @@ io.on('connection', (socket) => {
         } 
     });
     
+    // ✨ THE FIX: Correctly formats Joiner kill messages!
     socket.on('requestMobAttack', (data) => {
         const room = sessions[socket.roomId];
         if (room && room.mobs[data.id]) {
             room.mobs[data.id].health -= data.dmg; io.in(socket.roomId).emit('mobDamaged', { id: data.id, kbDir: data.kbDir });
-            if (room.mobs[data.id].health <= 0) { const mobType = room.mobs[data.id].type.toUpperCase(); delete room.mobs[data.id]; io.in(socket.roomId).emit('mobKilled', { mobId: data.id, killerName: room.players[socket.id].name, mobType: mobType }); }
+            
+            if (room.mobs[data.id].health <= 0) { 
+                const mobType = room.mobs[data.id].type.toUpperCase(); 
+                delete room.mobs[data.id]; 
+                
+                const killerMsg = `⚔️ ${room.players[socket.id].name} slaughtered a ${mobType}!`;
+                io.in(socket.roomId).emit('mobKilled', { mobId: data.id, killerName: killerMsg, mobType: mobType }); 
+            }
         }
     });
 
@@ -248,19 +266,26 @@ io.on('connection', (socket) => {
     
     socket.on('disconnect', () => { 
         if(socket.roomId && sessions[socket.roomId]) { 
+            // Save the disconnected joiner into active memory before removing them
+            if (sessions[socket.roomId].hostId !== socket.id) {
+                const pName = sessions[socket.roomId].players[socket.id].name;
+                // Note: Realistically, we can only save their name/health here, not inventory as the client holds it. 
+                // But Save & Exit secures it.
+            }
+            
             delete sessions[socket.roomId].players[socket.id]; 
             socket.to(socket.roomId).emit('playerDisconnected', socket.id); 
             
-            // ✨ MULTIPLAYER FIX: Cleanly handles host disconnecting
             if(sessions[socket.roomId].hostId === socket.id) { 
-                
                 const wName = sessions[socket.roomId].worldName;
                 if (!savedWorlds[wName]) savedWorlds[wName] = { seed: sessions[socket.roomId].seed, blocks: {}, players: {} };
+                savedWorlds[wName].passcode = sessions[socket.roomId].passcode;
+                savedWorlds[wName].hostName = sessions[socket.roomId].hostName;
                 savedWorlds[wName].blocks = JSON.parse(JSON.stringify(sessions[socket.roomId].blocks));
-                savedWorlds[wName].players = sessions[socket.roomId].savedPlayers; // Push the active memory back to the database
+                savedWorlds[wName].players = sessions[socket.roomId].savedPlayers; 
 
-                socket.to(socket.roomId).emit('hostLeft'); 
-                delete sessions[socket.roomId]; // Kill the active room
+                socket.to(socket.roomId).emit('hostLeft', 'The Host disconnected. The world has been closed.'); 
+                delete sessions[socket.roomId]; 
             } 
             broadcastLobby(); 
         } 
@@ -293,6 +318,7 @@ setInterval(() => {
 
                 if (floorY !== null) { 
                     const id = 'mob_' + globalIdCounter++; 
+                    
                     let isZombie;
                     if (isDay) { isZombie = true; } else { if (currentArchers < 6) { isZombie = Math.random() > 0.35; } else { isZombie = true; } }
 
@@ -355,7 +381,6 @@ setInterval(() => {
                             let dmg = 10; if(mob.weapon.includes('sword')) dmg = 25; else if(mob.weapon.includes('axe')) dmg = 20; else if(mob.weapon !== 'none') dmg = 15;
                             room.players[closestPlayer.id].health -= dmg; 
                             io.in(roomId).emit('playerDamaged', { id: closestPlayer.id, dmg: dmg, source: 'Zombie' }); 
-                            
                             if (room.players[closestPlayer.id].health <= 0) {
                                 io.in(roomId).emit('mobKilled', { mobId: 'none', killerName: `💀 ${room.players[closestPlayer.id].name} was mauled by a ZOMBIE!`, mobType: '' });
                             }
@@ -389,9 +414,7 @@ setInterval(() => {
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
                 mob.x -= targetX; 
                 if (mob.isGrounded && mob.isMoving) {
-                    if (!checkCollisionServer(mob.x + targetX, mob.y + 1.5, mob.z, room.seed, room.blocks)) {
-                        mob.vy = 8.5; mob.isGrounded = false;
-                    }
+                    if (!checkCollisionServer(mob.x + targetX, mob.y + 1.5, mob.z, room.seed, room.blocks)) { mob.vy = 8.5; mob.isGrounded = false; }
                 }
             }
             
@@ -399,9 +422,7 @@ setInterval(() => {
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
                 mob.z -= targetZ; 
                 if (mob.isGrounded && mob.isMoving) {
-                    if (!checkCollisionServer(mob.x, mob.y + 1.5, mob.z + targetZ, room.seed, room.blocks)) {
-                        mob.vy = 8.5; mob.isGrounded = false;
-                    }
+                    if (!checkCollisionServer(mob.x, mob.y + 1.5, mob.z + targetZ, room.seed, room.blocks)) { mob.vy = 8.5; mob.isGrounded = false; }
                 }
             }
 
@@ -419,9 +440,7 @@ setInterval(() => {
                         mob.y -= yStepAmt; mob.y = Math.floor(mob.y - 0.001) + 0.5; mob.vy = 0; mob.isGrounded = true; break; 
                     } else { mob.isGrounded = false; } 
                 } else if (mob.vy > 0) { 
-                    if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        mob.y -= yStepAmt; mob.vy = 0; break; 
-                    } 
+                    if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { mob.y -= yStepAmt; mob.vy = 0; break; } 
                 }
             }
 
