@@ -58,6 +58,7 @@ io.on('connection', (socket) => {
         };
 
         // ✨ FULL WORLD SNAPSHOT ON JOIN
+        // Forces the joiner to overwrite their local simulation with the Server's Truth
         socket.emit('world_snapshot', {
             players: room.players,
             blocks: room.blocks,
@@ -80,26 +81,34 @@ io.on('connection', (socket) => {
         }
     });
 
+    // ✨ SERVER VALIDATES WORLD CHANGES
     socket.on('blockUpdate', (data) => {
         if(socket.roomId && sessions[socket.roomId]) {
-            sessions[socket.roomId].blocks.push(data); // Save to server state
+            // Save to master server state so late joiners see it
+            sessions[socket.roomId].blocks.push(data); 
+            // Broadcast the official state change to all clients
             socket.to(socket.roomId).emit('blockUpdate', data);
         }
     });
 
+    // ✨ ITEM DUPLICATION FIX: Server controls Drops, not clients
     socket.on('spawnDrop', (data) => {
         if(socket.roomId && sessions[socket.roomId]) {
             const dropId = 'drop_' + dropIdCounter++;
             const dropData = { id: dropId, ...data };
             sessions[socket.roomId].drops[dropId] = dropData;
-            io.in(socket.roomId).emit('item_spawned', dropData); // Emit to everyone including sender
+            // Emit to EVERYONE including the sender. The client ONLY renders it when the server says so.
+            io.in(socket.roomId).emit('item_spawned', dropData); 
         }
     });
 
+    // ✨ ITEM DUPLICATION FIX: Server validates pickups
     socket.on('pickupDrop', (dropId) => {
         if(socket.roomId && sessions[socket.roomId]) {
+            // Validate: Only grant pickup if the server still has the item
             if (sessions[socket.roomId].drops[dropId]) {
-                delete sessions[socket.roomId].drops[dropId];
+                delete sessions[socket.roomId].drops[dropId]; // Remove from master state
+                // Tell everyone to delete it from their screen immediately
                 io.in(socket.roomId).emit('item_removed', dropId);
             }
         }
@@ -107,7 +116,7 @@ io.on('connection', (socket) => {
 
     socket.on('mobSync', (mobData) => {
         if(socket.roomId && sessions[socket.roomId]) {
-            sessions[socket.roomId].mobs = mobData; // Cache for late joiners
+            sessions[socket.roomId].mobs = mobData; 
             socket.to(socket.roomId).emit('mobSync', mobData);
         }
     });
@@ -115,6 +124,7 @@ io.on('connection', (socket) => {
     socket.on('clientHitMob', (data) => {
         if(socket.roomId && sessions[socket.roomId]) {
             const hostId = sessions[socket.roomId].hostId;
+            // Route client hit intents directly to the Host for Authoritative validation
             io.to(hostId).emit('mobDamagedByClient', data);
         }
     });
