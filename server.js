@@ -18,12 +18,13 @@ class SimpleNoise {
     }
 }
 
-// ✨ SERVER RAYCASTER: For Line-of-Sight
 function getBlockAt(x, y, z, seed, customBlocks) {
     const key = `${Math.round(x)},${Math.round(y)},${Math.round(z)}`;
     if (customBlocks[key]) return customBlocks[key];
+    
     const noise = new SimpleNoise(seed); const rough = new SimpleNoise(seed + 1337); const trees = new SimpleNoise(seed + 888);
     let elevation = Math.floor((noise.getNoise(x * 0.015, z * 0.015) + 1) * 8 + rough.getNoise(x * 0.06, z * 0.06) * 3) + 2;
+    
     if (y <= elevation) return 'stone';
     if (y > elevation && y <= elevation + 5 && trees.getNoise(x * 0.02, z * 0.02) > 0.1 && Math.abs(trees.random(x, z)) < 0.03) return 'wood'; 
     return 'air';
@@ -32,12 +33,16 @@ function getBlockAt(x, y, z, seed, customBlocks) {
 function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     let dist = Math.sqrt(Math.pow(x2-x1, 2) + Math.pow(y2-y1, 2) + Math.pow(z2-z1, 2));
     let dx = (x2-x1)/dist; let dy = (y2-y1)/dist; let dz = (z2-z1)/dist;
-    for(let i=1; i<dist; i+=1) { if (getBlockAt(x1 + dx*i, y1 + dy*i, z1 + dz*i, seed, customBlocks) !== 'air') return false; }
+    for(let i=1; i<dist; i+=1) {
+        if (getBlockAt(x1 + dx*i, y1 + dy*i, z1 + dz*i, seed, customBlocks) !== 'air') return false;
+    }
     return true;
 }
 
 function getTrueSurfaceY(x, z, seed, customBlocks) {
-    for(let y = 60; y >= -10; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
+    for(let y = 60; y >= -10; y--) {
+        if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y;
+    }
     return 2;
 }
 
@@ -98,18 +103,24 @@ setInterval(() => {
         const room = sessions[roomId]; const playerIds = Object.keys(room.players); if (playerIds.length === 0) continue;
         const dayTime = ((Date.now() - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
-        // ✨ SPAWNER OPTIMIZATION: Max 15 mobs, strictly 25+ blocks away from nearest player
-        if (Object.keys(room.mobs).length < 15 && Math.random() < 0.1) {
+        // ✨ DAY/NIGHT SPAWN LOGIC: 8% chance at night, 1.5% chance during the day
+        const spawnChance = isDay ? 0.015 : 0.08;
+
+        if (Object.keys(room.mobs).length < 15 && Math.random() < spawnChance) {
             const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
-            const angle = Math.random() * Math.PI * 2; const dist = 25 + Math.random() * 15; // 25-40 blocks away
+            const angle = Math.random() * Math.PI * 2; const dist = 25 + Math.random() * 15; 
             const mx = targetPlayer.x + Math.cos(angle) * dist; const mz = targetPlayer.z + Math.sin(angle) * dist;
             let my = getTrueSurfaceY(mx, mz, room.seed, room.blocks);
 
             if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air' && getBlockAt(mx, my+2, mz, room.seed, room.blocks) === 'air') { 
-                const id = 'mob_' + globalIdCounter++; const isZombie = Math.random() > 0.5; const faceVar = Math.random();
+                const id = 'mob_' + globalIdCounter++; 
+                
+                // ✨ RARITY FIX: 85% Zombie / 15% Archer
+                const isZombie = Math.random() > 0.15; 
+                
+                const faceVar = Math.random();
                 const faceType = isZombie ? (faceVar < 0.3 ? 'zombie_face_var1' : faceVar < 0.6 ? 'zombie_face_var2' : 'zombie_face') : (faceVar < 0.5 ? 'archer_face_var1' : 'archer_face');
                 
-                // Weapon Randomization
                 const zombieWeapons = ['none', 'wooden_sword', 'stone_sword', 'wooden_axe', 'stone_pickaxe', 'wooden_shovel'];
                 const archerWeapons = ['bow', 'crossbow', 'gun'];
                 const weapon = isZombie ? zombieWeapons[Math.floor(Math.random() * zombieWeapons.length)] : archerWeapons[Math.floor(Math.random() * archerWeapons.length)];
@@ -133,7 +144,6 @@ setInterval(() => {
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
             mob.isBurning = false;
 
-            // SUNBURN
             let hasRoof = false;
             for(let ty=mob.y; ty < mob.y+30; ty++) { if(getBlockAt(mob.x, ty, mob.z, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } }
             if (mob.type === 'zombie' && isDay && !hasRoof) {
@@ -144,16 +154,14 @@ setInterval(() => {
                 }
             }
 
-            // ✨ TRUE PHYSICS: Apply Gravity
             mob.vy -= 20.0 * 0.05; 
             mob.y += mob.vy * 0.05;
             let groundBlockY = getTrueSurfaceY(mob.x, mob.z, room.seed, room.blocks);
-            let groundY = groundBlockY + 0.5; // Top of the block
+            let groundY = groundBlockY + 0.5; 
 
             if (mob.y <= groundY) { mob.y = groundY; mob.vy = 0; mob.isGrounded = true; } 
             else { mob.isGrounded = false; }
 
-            // ✨ AI PATHFINDING WITH LINE OF SIGHT
             let los = closestPlayer ? hasLineOfSight(mob.x, mob.y+1, mob.z, closestPlayer.x, closestPlayer.y+1, closestPlayer.z, room.seed, room.blocks) : false;
 
             if (mob.isBurning && !closestPlayer) {
@@ -161,7 +169,6 @@ setInterval(() => {
             } else if (closestPlayer && minD < 24 && los) {
                 const angle = Math.atan2(closestPlayer.x - mob.x, closestPlayer.z - mob.z); mob.ry = angle;
                 
-                // Obstacle Jumping
                 let frontBlock = getBlockAt(mob.x + Math.sin(angle)*0.8, mob.y, mob.z + Math.cos(angle)*0.8, room.seed, room.blocks);
                 if (frontBlock !== 'air' && mob.isGrounded) { mob.vy = 7.0; mob.isGrounded = false; } 
 
@@ -171,7 +178,6 @@ setInterval(() => {
                         mob.isMoving = false;
                         if (mob.attackTimer <= 0) { 
                             mob.attackTimer = 1.5; mob.isAttacking = true; 
-                            // Weapon Damage Boost
                             let dmg = 10; if(mob.weapon.includes('sword')) dmg = 25; else if(mob.weapon !== 'none') dmg = 15;
                             room.players[closestPlayer.id].health -= dmg; 
                             io.in(roomId).emit('playerDamaged', { id: closestPlayer.id, dmg: dmg, source: 'Zombie' }); 
@@ -187,13 +193,11 @@ setInterval(() => {
                     } else mob.isAttacking = false;
                 }
             } else if (mob.isGrounded) { 
-                // Wander
                 if(Math.random() < 0.05) mob.ry += (Math.random() - 0.5) * Math.PI;
                 if(Math.random() < 0.5) { mob.x += Math.sin(mob.ry) * 0.05; mob.z += Math.cos(mob.ry) * 0.05; mob.isMoving = true; } else mob.isMoving = false;
                 mob.isAttacking = false; 
             }
 
-            // Despawn if too far
             if (minD > 45) { delete room.mobs[mobId]; io.in(roomId).emit('mobKilled', { mobId: mobId, killerName: 'Despawn', mobType: 'SYSTEM' }); }
         }
         io.in(roomId).emit('server_tick', { players: room.players, mobs: room.mobs });
