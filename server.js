@@ -65,7 +65,7 @@ function getBlockAt(x, y, z, seed, customBlocks) {
 function checkCollisionServer(x, y, z, seed, customBlocks) {
     const radius = 0.25; 
     const feetY = y; 
-    const headY = y + 1.7;
+    const headY = y + 1.7; 
     
     const pMinX = Math.floor(x - radius + 0.5); 
     const pMaxX = Math.floor(x + radius + 0.5); 
@@ -94,28 +94,22 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     return true;
 }
 
-// ✨ THE FIX: We collect ALL valid floors (cave floors, plains, mountains) and pick one randomly so spawns don't get aborted by tree leaves.
+// ✨ THE FIX: Scans from the sky directly downward and returns the very first solid block it hits.
+// This guarantees they spawn directly on the grassland surface exactly where you are standing.
 function getValidSpawnY(x, z, seed, customBlocks) {
-    let validFloors = [];
-    for (let y = -28; y <= 60; y++) {
+    for (let y = 60; y >= -30; y--) {
         const type = getBlockAt(x, y, z, seed, customBlocks);
         
         // Find a solid block to stand on
         if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
-            
-            // Validate the two blocks above it are empty air space
             const blockAbove1 = getBlockAt(x, y + 1, z, seed, customBlocks);
             const blockAbove2 = getBlockAt(x, y + 2, z, seed, customBlocks);
             
+            // Validate the two blocks above it are empty air space
             if ((blockAbove1 === 'air' || blockAbove1 === 'torch') && (blockAbove2 === 'air' || blockAbove2 === 'torch')) {
-                validFloors.push(y);
+                return y; 
             }
         }
-    }
-    
-    if (validFloors.length > 0) {
-        // Pick a random valid floor in this X/Z column (allows cave spawning)
-        return validFloors[Math.floor(Math.random() * validFloors.length)];
     }
     return null;
 }
@@ -166,12 +160,13 @@ setInterval(() => {
         const room = sessions[roomId]; const playerIds = Object.keys(room.players); if (playerIds.length === 0) continue;
         const dayTime = ((now - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
-        if (Object.keys(room.mobs).length < 15 && (now - room.lastSpawnTime > 2500)) {
-            const spawnChance = isDay ? 0.05 : 0.2; 
+        // ✨ THE FIX: Increased max mobs to 25 and significantly sped up spawning rates
+        if (Object.keys(room.mobs).length < 25 && (now - room.lastSpawnTime > 1000)) {
+            const spawnChance = isDay ? 0.2 : 0.6; 
             if (Math.random() < spawnChance) {
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
                 const angle = Math.random() * Math.PI * 2; 
-                const dist = 15 + Math.random() * 10; 
+                const dist = 15 + Math.random() * 15; // Spawns further out so you can see them approach
                 const mx = targetPlayer.x + Math.cos(angle) * dist; 
                 const mz = targetPlayer.z + Math.sin(angle) * dist;
                 
@@ -277,17 +272,22 @@ setInterval(() => {
 
             for (let i = 0; i < ySteps; i++) {
                 mob.y += yStepAmt;
+                
+                // ✨ THE FIX: Bulletproof undo-step physics engine. 
+                // If a collision occurs, it steps back and snaps perfectly to the top of the block.
                 if (mob.vy < 0) { 
                     if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        mob.y = Math.floor(mob.y - 0.5) + 0.5; 
-                        mob.vy = 0; mob.isGrounded = true; 
+                        mob.y -= yStepAmt; // Step back out of the collision
+                        mob.y = Math.floor(mob.y - 0.001) + 0.5; // Snap perfectly to the grid line
+                        mob.vy = 0; 
+                        mob.isGrounded = true; 
                         break; 
                     } else { 
                         mob.isGrounded = false; 
                     } 
                 } else if (mob.vy > 0) { 
                     if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        mob.y = Math.floor(mob.y + 1.7 + 0.5) - 0.5 - 1.7; 
+                        mob.y -= yStepAmt; // Step back out of the collision
                         mob.vy = 0; 
                         break; 
                     } 
