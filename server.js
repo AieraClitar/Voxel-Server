@@ -21,28 +21,34 @@ class SimpleNoise {
     }
 }
 
+const Y_OFFSET = 30;
+
 function getBlockAt(x, y, z, seed, customBlocks) {
     const bx = Math.floor(x); const by = Math.floor(y); const bz = Math.floor(z);
     const key = `${bx},${by},${bz}`;
     if (customBlocks[key]) return customBlocks[key];
     
-    const noise = new SimpleNoise(seed); const rough = new SimpleNoise(seed + 1337); const trees = new SimpleNoise(seed + 888);
+    const noise = new SimpleNoise(seed); 
+    const rough = new SimpleNoise(seed + 1337); 
+    const trees = new SimpleNoise(seed + 888);
     const tempMap = new SimpleNoise(seed + 555);
     
-    let elevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
+    let rawElevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
+    let trueElevation = rawElevation + Y_OFFSET; 
     let isTundra = tempMap.getNoise(bx * 0.005, bz * 0.005) < -0.25;
     
-    if (by <= elevation) return 'stone';
-    if (!isTundra && by > elevation && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
+    if (by <= trueElevation) return 'stone';
+    if (!isTundra && by > trueElevation && by <= trueElevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
     return 'air';
 }
 
-// ✨ CRITICAL FIX: The Server now uses the EXACT SAME bounding box math (+0.5 offset) as Player.js
+// ✨ THE FIX: Exact replica of the Client's physics bounding box.
 function checkCollisionServer(x, y, z, seed, customBlocks) {
     const radius = 0.25; 
     const feetY = y; 
-    const headY = y + 1.7; // Mobs are 1.7 blocks tall
+    const headY = y + 1.7; // Mobs are roughly 1.7 units tall
     
+    // Add the 0.5 to align with the center of the block mesh
     const pMinX = Math.floor(x - radius + 0.5); 
     const pMaxX = Math.floor(x + radius + 0.5); 
     const pMinY = Math.floor(feetY + 0.5); 
@@ -55,6 +61,7 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
             for (let bz = pMinZ; bz <= pMaxZ; bz++) {
                 const type = getBlockAt(bx, by, bz, seed, customBlocks);
                 if (type !== 'air' && type !== 'water' && type !== 'torch') {
+                    // Check if they are physically inside the 1x1 voxel bounds
                     if (feetY < by + 0.5 && headY > by - 0.5) return true;
                 }
             }
@@ -71,7 +78,7 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
 }
 
 function getTrueSurfaceY(x, z, seed, customBlocks) {
-    for(let y = 30; y >= -30; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
+    for(let y = 60; y >= -30; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
     return -28; 
 }
 
@@ -91,7 +98,7 @@ io.on('connection', (socket) => {
 
     function joinRoom(socket, roomId, playerName) {
         socket.join(roomId); socket.roomId = roomId; const room = sessions[roomId];
-        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: 10, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
+        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: Y_OFFSET + 10, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
         socket.emit('world_snapshot', { seed: room.seed, players: room.players, blocks: room.blocks, drops: room.drops, mobs: room.mobs, ageInSeconds: (Date.now() - room.startTime) / 1000, isHost: socket.id === room.hostId });
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
@@ -129,7 +136,6 @@ setInterval(() => {
                 const dist = 15 + Math.random() * 10; 
                 const mx = targetPlayer.x + Math.cos(angle) * dist; const mz = targetPlayer.z + Math.sin(angle) * dist;
                 
-                let spawnY = targetPlayer.y + 10;
                 let my = getTrueSurfaceY(mx, mz, room.seed, room.blocks);
 
                 if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air' && getBlockAt(mx, my+2, mz, room.seed, room.blocks) === 'air') { 
@@ -142,7 +148,7 @@ setInterval(() => {
 
                     room.mobs[id] = { 
                         id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
-                        x: mx, y: my + 0.5, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false
+                        x: mx, y: my + 1.0, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false
                     };
                     room.lastSpawnTime = now; io.in(roomId).emit('mobSpawned', room.mobs[id]);
                 }
@@ -160,7 +166,6 @@ setInterval(() => {
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
             mob.isBurning = false; const mobSpeed = mob.type === 'zombie' ? 4.5 : 3.5;
 
-            // ✨ THE FIX: Sunburn death now emits silent despawn! No more chat spam.
             let hasRoof = false;
             for(let ty = Math.floor(mob.y); ty < Math.floor(mob.y)+20; ty++) { if(getBlockAt(mob.x, ty, mob.z, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } }
             
@@ -179,10 +184,8 @@ setInterval(() => {
             let targetX = 0, targetZ = 0;
             let los = closestPlayer ? hasLineOfSight(mob.x, mob.y + 1.5, mob.z, closestPlayer.x, closestPlayer.y + 1.5, closestPlayer.z, room.seed, room.blocks) : false;
 
-            // ✨ THE FIX: Burning zombies pick a random direction and run, seeking shade. No more spinning in circles.
             if (mob.isBurning && !closestPlayer) {
-                if (Math.random() < 0.05) mob.ry = Math.random() * Math.PI * 2; 
-                targetX = Math.sin(mob.ry) * mobSpeed * 0.05; targetZ = Math.cos(mob.ry) * mobSpeed * 0.05; mob.isMoving = true;
+                mob.ry += 0.5; targetX = Math.sin(mob.ry) * mobSpeed * 0.05; targetZ = Math.cos(mob.ry) * mobSpeed * 0.05; mob.isMoving = true;
             } else if (closestPlayer && minD < 20 && los) {
                 const angle = Math.atan2(closestPlayer.x - mob.x, closestPlayer.z - mob.z); mob.ry = angle;
                 
@@ -212,7 +215,7 @@ setInterval(() => {
                 mob.isAttacking = false; 
             }
 
-            // ✨ THE FIX: X/Z collision exactly mirrors Player.js. Pits correctly drop mobs!
+            // ✨ HORIZONTAL COLLISION (Exact mirror of Player.js)
             mob.x += targetX;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
                 mob.x -= targetX; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
@@ -222,30 +225,31 @@ setInterval(() => {
                 mob.z -= targetZ; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
 
-            // ✨ THE FIX: Y collision exactly mirrors Player.js. Perfect surface tracking.
+            // ✨ VERTICAL GRAVITY & COLLISION (Exact mirror of Player.js)
             mob.vy -= 25.0 * 0.05; 
             let yMove = mob.vy * 0.05;
-            let ySteps = Math.max(1, Math.ceil(Math.abs(yMove) / 0.1));
+            let ySteps = Math.max(1, Math.ceil(Math.abs(yMove) / 0.1)); 
             let yStepAmt = yMove / ySteps;
 
             for (let i = 0; i < ySteps; i++) {
                 mob.y += yStepAmt;
-                if (mob.vy < 0) {
-                    if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
-                        mob.y = Math.floor(mob.y + 0.5) + 0.5; // Snap perfectly to block surface
+                if (mob.vy < 0) { 
+                    if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
+                        // If they hit the ground, snap exactly to the block surface (Y + 0.5)
+                        mob.y = Math.floor(mob.y - 0.5) + 0.5 + 1.7; // Headroom calculation
+                        mob.vy = 0; mob.isGrounded = true; 
+                        break; 
+                    } else { 
+                        mob.isGrounded = false; 
+                    } 
+                } else if (mob.vy > 0) { 
+                    if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
+                        mob.y = Math.floor(mob.y + 0.2 + 0.5) - 0.5 - 0.2; 
                         mob.vy = 0; 
-                        mob.isGrounded = true; 
-                        break;
-                    }
-                } else if (mob.vy > 0) {
-                    if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
-                        mob.y = Math.floor(mob.y + 1.7 + 0.5) - 0.5 - 1.7; // Head bonk ceiling
-                        mob.vy = 0; 
-                        break;
-                    }
+                        break; 
+                    } 
                 }
             }
-            if (mob.vy !== 0) mob.isGrounded = false;
 
             if (minD > 60 || mob.y < -35) { 
                 delete room.mobs[mobId]; 
