@@ -8,17 +8,16 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 
 class SimpleNoise {
     constructor(seed = 1) { this.seed = seed; }
-    random(x, z) { const sin = Math.sin(Math.floor(x) * 12.9898 + Math.floor(z) * 78.233 + this.seed) * 43758.5453; return sin - Math.floor(sin); }
+    random(x, z) { let n = x * 331 + z * 337 + this.seed; n = (n << 13) ^ n; return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0); }
     getNoise(x, z) {
         const intX = Math.floor(x); const intZ = Math.floor(z); const fractX = x - intX; const fractZ = z - intZ;
         const v1 = this.random(intX, intZ); const v2 = this.random(intX + 1, intZ); const v3 = this.random(intX, intZ + 1); const v4 = this.random(intX + 1, intZ + 1);
-        const fX = (1 - Math.cos(fractX * Math.PI)) * 0.5; const fZ = (1 - Math.cos(fractZ * Math.PI)) * 0.5;
-        const i1 = v1 * (1 - fX) + v2 * fX; const i2 = v3 * (1 - fX) + v4 * fX;
-        return (i1 * (1 - fZ) + i2 * fZ) * 2.0 - 1.0;
+        const i1 = v1 * (1 - fractX) + v2 * fractX; const i2 = v3 * (1 - fractX) + v4 * fractX;
+        return i1 * (1 - fractZ) + i2 * fractZ;
     }
 }
 
-// ✨ Y_OFFSET FIX: The Server must know the client shifts everything down by 30!
+// ✨ THE FIX: Aligning Server physics identically with Client Y_OFFSET
 const Y_OFFSET = 30;
 
 function getBlockAt(x, y, z, seed, customBlocks) {
@@ -27,9 +26,7 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     if (customBlocks[key]) return customBlocks[key];
     
     const noise = new SimpleNoise(seed); const rough = new SimpleNoise(seed + 1337); const trees = new SimpleNoise(seed + 888);
-    // Calculate raw array elevation
     let rawElevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
-    // Apply Client Offset
     let trueElevation = rawElevation - Y_OFFSET;
     
     if (by <= trueElevation) return 'stone';
@@ -42,36 +39,23 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
     const pMinX = Math.floor(x - radius); const pMaxX = Math.floor(x + radius);
     const pMinY = Math.floor(feetY); const pMaxY = Math.floor(headY);
     const pMinZ = Math.floor(z - radius); const pMaxZ = Math.floor(z + radius);
-    
-    for (let bx = pMinX; bx <= pMaxX; bx++) {
-        for (let by = pMinY; by <= pMaxY; by++) {
-            for (let bz = pMinZ; bz <= pMaxZ; bz++) {
-                if (getBlockAt(bx, by, bz, seed, customBlocks) !== 'air') return true;
-            }
-        }
-    }
+    for (let bx = pMinX; bx <= pMaxX; bx++) { for (let by = pMinY; by <= pMaxY; by++) { for (let bz = pMinZ; bz <= pMaxZ; bz++) { if (getBlockAt(bx, by, bz, seed, customBlocks) !== 'air') return true; } } }
     return false;
 }
 
 function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     let dist = Math.sqrt(Math.pow(x2-x1, 2) + Math.pow(y2-y1, 2) + Math.pow(z2-z1, 2));
     let dx = (x2-x1)/dist; let dy = (y2-y1)/dist; let dz = (z2-z1)/dist;
-    for(let i=0.5; i<dist; i+=0.5) { 
-        if (getBlockAt(x1 + dx*i, y1 + dy*i, z1 + dz*i, seed, customBlocks) !== 'air') return false; 
-    }
+    for(let i=0.5; i<dist; i+=0.5) { if (getBlockAt(x1 + dx*i, y1 + dy*i, z1 + dz*i, seed, customBlocks) !== 'air') return false; }
     return true;
 }
 
 function getTrueSurfaceY(x, z, seed, customBlocks) {
-    // Search downward from the sky (30 blocks above 0) to bedrock (-30)
-    for(let y = 30; y >= -30; y--) { 
-        if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; 
-    }
-    return -28; // Default floor
+    for(let y = 60; y >= -30; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
+    return -28; 
 }
 
-const sessions = {}; 
-let globalIdCounter = 0;
+const sessions = {}; let globalIdCounter = 0;
 
 io.on('connection', (socket) => {
     const broadcastLobby = () => { io.emit('lobbyUpdate', Object.keys(sessions).map(id => ({ id: id, hostName: sessions[id].hostName, playerCount: Object.keys(sessions[id].players).length }))); };
@@ -79,10 +63,7 @@ io.on('connection', (socket) => {
 
     socket.on('createGame', (playerName) => {
         const roomId = socket.id; 
-        sessions[roomId] = { 
-            seed: Math.floor(Math.random() * 10000), hostName: playerName || "Guest", 
-            players: {}, blocks: {}, drops: {}, mobs: {}, startTime: Date.now(), lastSpawnTime: 0 
-        };
+        sessions[roomId] = { seed: Math.floor(Math.random() * 10000), hostName: playerName || "Guest", players: {}, blocks: {}, drops: {}, mobs: {}, startTime: Date.now(), lastSpawnTime: 0 };
         joinRoom(socket, roomId, playerName); broadcastLobby(); 
     });
 
@@ -90,21 +71,13 @@ io.on('connection', (socket) => {
 
     function joinRoom(socket, roomId, playerName) {
         socket.join(roomId); socket.roomId = roomId; const room = sessions[roomId];
-        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: 30, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
+        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: 10, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
         socket.emit('world_snapshot', { seed: room.seed, players: room.players, blocks: room.blocks, drops: room.drops, mobs: room.mobs, ageInSeconds: (Date.now() - room.startTime) / 1000, isHost: socket.id === room.hostId });
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
 
     socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
-    
-    socket.on('requestBlockBreak', (data) => {
-        const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`;
-        const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; 
-        room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType });
-        const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType };
-        room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
-    });
-    
+    socket.on('requestBlockBreak', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
     socket.on('requestBlockPlace', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); });
     socket.on('requestDropItem', (data) => { const room = sessions[socket.roomId]; if (!room) return; const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
     socket.on('requestPickup', (dropId) => { const room = sessions[socket.roomId]; if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); } });
@@ -114,22 +87,12 @@ io.on('connection', (socket) => {
         const room = sessions[socket.roomId];
         if (room && room.mobs[data.id]) {
             room.mobs[data.id].health -= data.dmg; io.in(socket.roomId).emit('mobDamaged', { id: data.id, kbDir: data.kbDir });
-            if (room.mobs[data.id].health <= 0) { 
-                const mobType = room.mobs[data.id].type.toUpperCase(); delete room.mobs[data.id]; 
-                // ✨ FIX: Strict separation of Player Kills vs Despawns
-                io.in(socket.roomId).emit('mobKilled', { mobId: data.id, killerName: room.players[socket.id].name, mobType: mobType }); 
-            }
+            if (room.mobs[data.id].health <= 0) { const mobType = room.mobs[data.id].type.toUpperCase(); delete room.mobs[data.id]; io.in(socket.roomId).emit('mobKilled', { mobId: data.id, killerName: room.players[socket.id].name, mobType: mobType }); }
         }
     });
 
     socket.on('playerRespawn', () => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) sessions[socket.roomId].players[socket.id].health = 100; });
-    socket.on('disconnect', () => {
-        if(socket.roomId && sessions[socket.roomId]) {
-            delete sessions[socket.roomId].players[socket.id]; socket.to(socket.roomId).emit('playerDisconnected', socket.id);
-            if(sessions[socket.roomId].hostId === socket.id) { socket.to(socket.roomId).emit('hostLeft'); delete sessions[socket.roomId]; }
-            broadcastLobby(); 
-        }
-    });
+    socket.on('disconnect', () => { if(socket.roomId && sessions[socket.roomId]) { delete sessions[socket.roomId].players[socket.id]; socket.to(socket.roomId).emit('playerDisconnected', socket.id); if(sessions[socket.roomId].hostId === socket.id) { socket.to(socket.roomId).emit('hostLeft'); delete sessions[socket.roomId]; } broadcastLobby(); } });
 });
 
 setInterval(() => {
@@ -138,7 +101,7 @@ setInterval(() => {
         const room = sessions[roomId]; const playerIds = Object.keys(room.players); if (playerIds.length === 0) continue;
         const dayTime = ((now - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
-        if (Object.keys(room.mobs).length < 12 && (now - room.lastSpawnTime > 2000)) {
+        if (Object.keys(room.mobs).length < 15 && (now - room.lastSpawnTime > 2500)) {
             const spawnChance = isDay ? 0.02 : 0.1;
             if (Math.random() < spawnChance) {
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
@@ -147,19 +110,14 @@ setInterval(() => {
                 let my = getTrueSurfaceY(mx, mz, room.seed, room.blocks);
 
                 if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air' && getBlockAt(mx, my+2, mz, room.seed, room.blocks) === 'air') { 
-                    const id = 'mob_' + globalIdCounter++; 
-                    const isZombie = Math.random() > 0.25; 
+                    const id = 'mob_' + globalIdCounter++; const isZombie = Math.random() > 0.25; 
                     const faceType = isZombie ? 'zombie_face' : 'archer_face';
                     const zombieWeapons = ['none', 'none', 'wooden_sword', 'stone_sword', 'wooden_axe', 'stone_pickaxe', 'wooden_shovel'];
                     const archerWeapons = ['bow', 'bow', 'crossbow', 'gun'];
                     const weapon = isZombie ? zombieWeapons[Math.floor(Math.random() * zombieWeapons.length)] : archerWeapons[Math.floor(Math.random() * archerWeapons.length)];
 
-                    room.mobs[id] = { 
-                        id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
-                        x: mx, y: my + 1.0, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0
-                    };
-                    room.lastSpawnTime = now;
-                    io.in(roomId).emit('mobSpawned', room.mobs[id]);
+                    room.mobs[id] = { id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, x: mx, y: my + 1.0, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0 };
+                    room.lastSpawnTime = now; io.in(roomId).emit('mobSpawned', room.mobs[id]);
                 }
             }
         }
@@ -173,8 +131,7 @@ setInterval(() => {
             }
 
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
-            mob.isBurning = false;
-            const mobSpeed = mob.type === 'zombie' ? 4.5 : 3.5;
+            mob.isBurning = false; const mobSpeed = mob.type === 'zombie' ? 4.5 : 3.5;
 
             // SUNBURN
             let hasRoof = false;
@@ -183,7 +140,7 @@ setInterval(() => {
                 mob.isBurning = true; 
                 if (Math.random() < 0.1) {
                     mob.health -= 5; io.in(roomId).emit('mobDamaged', { id: mob.id, kbDir: {x:0, y:0, z:0} });
-                    if (mob.health <= 0) { io.in(roomId).emit('mobDespawned', mobId); delete room.mobs[mobId]; continue; }
+                    if (mob.health <= 0) { io.in(roomId).emit('mobKilled', { mobId: mob.id, killerName: 'The Sun', mobType: 'ZOMBIE' }); delete room.mobs[mobId]; continue; }
                 }
             }
 
@@ -225,36 +182,22 @@ setInterval(() => {
             // HORIZONTAL (AABB)
             mob.x += targetX;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
-                mob.x -= targetX; 
-                if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
+                mob.x -= targetX; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
             mob.z += targetZ;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
-                mob.z -= targetZ; 
-                if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
+                mob.z -= targetZ; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
 
             // VERTICAL (AABB)
             mob.vy -= 25.0 * 0.05; 
             let nextY = mob.y + (mob.vy * 0.05);
             if (checkCollisionServer(mob.x, nextY, mob.z, room.seed, room.blocks)) {
-                if (mob.vy < 0) {
-                    mob.y = Math.floor(nextY) + 1.0; 
-                    mob.vy = 0; mob.isGrounded = true;
-                } else {
-                    mob.y = Math.floor(nextY + 1.8) - 1.8; 
-                    mob.vy = 0; mob.isGrounded = false;
-                }
-            } else {
-                mob.y = nextY;
-                mob.isGrounded = false;
-            }
+                if (mob.vy < 0) { mob.y = Math.floor(nextY) + 1.0; mob.vy = 0; mob.isGrounded = true; } 
+                else { mob.y = Math.floor(nextY + 1.8) - 1.8; mob.vy = 0; mob.isGrounded = false; }
+            } else { mob.y = nextY; mob.isGrounded = false; }
 
-            // ✨ SILENT DESPAWN: Completely removes Chat Spam
-            if (minD > 45 || mob.y < -35) { 
-                delete room.mobs[mobId]; 
-                io.in(roomId).emit('mobDespawned', mobId); 
-            }
+            if (minD > 45 || mob.y < -30) { delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); }
         }
         io.in(roomId).emit('server_tick', { players: room.players, mobs: room.mobs });
     }
