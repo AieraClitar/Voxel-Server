@@ -21,6 +21,7 @@ class SimpleNoise {
     }
 }
 
+// ✨ THE FIX: Match World.js exact block generation for Water/Ice collision tracking
 function getBlockAt(x, y, z, seed, customBlocks) {
     const bx = Math.floor(x); const by = Math.floor(y); const bz = Math.floor(z);
     const key = `${bx},${by},${bz}`;
@@ -32,21 +33,33 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     const tempMap = new SimpleNoise(seed + 555);
     const humidMap = new SimpleNoise(seed + 999);
     
-    let elevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
-    
-    // ✨ THE CAVE FIX: Server now recognizes caves, allowing mobs to fall into them!
+    let height = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
+    let temp = tempMap.getNoise(bx * 0.005, bz * 0.005);
+    let humid = humidMap.getNoise(bx * 0.005, bz * 0.005);
+    let biome = 'plains'; if (temp > 0.2 && humid < 0) biome = 'desert'; else if (temp < -0.25) biome = 'tundra';
+
     let isCave = false;
-    if (by <= elevation && by > -30) {
+    if (by <= height && by > -30) {
         let n1 = rough.getNoise(bx * 0.04, by * 0.04 + bz * 0.01); 
         let n2 = humidMap.getNoise(bz * 0.04, by * 0.04 + bx * 0.01); 
         if (Math.abs(n1) < 0.12 && Math.abs(n2) < 0.12) isCave = true;
     }
 
     if (isCave) return 'air';
-    if (by <= elevation) return 'stone';
+    
+    // Server now recognizes Lakes and Ice surfaces perfectly!
+    if (by > height && by <= 5) return (biome === 'tundra' && by === 5) ? 'ice' : 'water';
+    if (by === height) {
+        if (height < 5) return 'dirt'; 
+        if (biome === 'desert') return 'sand';
+        if (biome === 'tundra') return 'snow';
+        return height <= 6 ? 'sand' : 'grass';
+    }
+    if (by > height - 3 && by !== -30) return biome === 'desert' ? 'sand' : 'dirt';
+    if (by <= height) return 'stone';
 
-    let isTundra = tempMap.getNoise(bx * 0.005, bz * 0.005) < -0.25;
-    if (!isTundra && by > elevation && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
+    let isTundra = biome === 'tundra';
+    if (!isTundra && by > height && by <= height + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
     
     return 'air';
 }
@@ -67,6 +80,7 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
         for (let by = pMinY; by <= pMaxY; by++) {
             for (let bz = pMinZ; bz <= pMaxZ; bz++) {
                 const type = getBlockAt(bx, by, bz, seed, customBlocks);
+                // ✨ Ice is solid. Water is not solid. Mobs will fall through water but stop on ice.
                 if (type !== 'air' && type !== 'water' && type !== 'torch') {
                     if (feetY < by + 0.5 && headY > by - 0.5) return true;
                 }
@@ -154,7 +168,7 @@ setInterval(() => {
 
                     room.mobs[id] = { 
                         id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
-                        x: mx, y: my + 0.5, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false
+                        x: mx, y: my + 0.5, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false, roamTimer: 0
                     };
                     room.lastSpawnTime = now; io.in(roomId).emit('mobSpawned', room.mobs[id]);
                 }
@@ -190,8 +204,14 @@ setInterval(() => {
             let targetX = 0, targetZ = 0;
             let los = closestPlayer ? hasLineOfSight(mob.x, mob.y + 1.5, mob.z, closestPlayer.x, closestPlayer.y + 1.5, closestPlayer.z, room.seed, room.blocks) : false;
 
+            // ✨ THE FIX: Tiktak fix! Mobs now have a state timer and walk smoothly instead of deciding every tick.
             if (mob.isBurning && !closestPlayer) {
-                mob.ry += 0.5; targetX = Math.sin(mob.ry) * mobSpeed * 0.05; targetZ = Math.cos(mob.ry) * mobSpeed * 0.05; mob.isMoving = true;
+                if (!mob.roamTimer || mob.roamTimer <= 0) {
+                    mob.ry = Math.random() * Math.PI * 2; // Pick a direction and RUN
+                    mob.roamTimer = 20; 
+                }
+                mob.roamTimer--;
+                targetX = Math.sin(mob.ry) * mobSpeed * 0.06; targetZ = Math.cos(mob.ry) * mobSpeed * 0.06; mob.isMoving = true;
             } else if (closestPlayer && minD < 20 && los) {
                 const angle = Math.atan2(closestPlayer.x - mob.x, closestPlayer.z - mob.z); mob.ry = angle;
                 
@@ -216,8 +236,19 @@ setInterval(() => {
                     } else mob.isAttacking = false;
                 }
             } else if (mob.isGrounded) { 
-                if(Math.random() < 0.05) mob.ry += (Math.random() - 0.5) * Math.PI;
-                if(Math.random() < 0.2) { targetX = Math.sin(mob.ry) * mobSpeed * 0.02; targetZ = Math.cos(mob.ry) * mobSpeed * 0.02; mob.isMoving = true; } else mob.isMoving = false;
+                // Roaming state timer
+                if (!mob.roamTimer || mob.roamTimer <= 0) {
+                    mob.roamTimer = 20 + Math.floor(Math.random() * 40); // Walk or stand for 1 to 3 seconds
+                    mob.isMoving = Math.random() < 0.6; // 60% chance to roam
+                    if (mob.isMoving) mob.ry += (Math.random() - 0.5) * Math.PI;
+                }
+                mob.roamTimer--;
+                
+                if (mob.isMoving) {
+                    targetX = Math.sin(mob.ry) * mobSpeed * 0.02; targetZ = Math.cos(mob.ry) * mobSpeed * 0.02; 
+                } else {
+                    targetX = 0; targetZ = 0; 
+                }
                 mob.isAttacking = false; 
             }
 
@@ -230,7 +261,14 @@ setInterval(() => {
                 mob.z -= targetZ; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
 
-            mob.vy -= 25.0 * 0.05; 
+            // ✨ THE FIX: Mobs have buoyancy! They don't sink like rocks into lakes.
+            let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water';
+            if (inWater) {
+                mob.vy = 2.0; 
+            } else {
+                mob.vy -= 25.0 * 0.05; 
+            }
+
             let yMove = mob.vy * 0.05;
             let ySteps = Math.max(1, Math.ceil(Math.abs(yMove) / 0.1)); 
             let yStepAmt = yMove / ySteps;
@@ -239,8 +277,7 @@ setInterval(() => {
                 mob.y += yStepAmt;
                 if (mob.vy < 0) { 
                     if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        // ✨ THE PHYSICS FIX: Perfectly snaps to the floor without bouncing 1.7 blocks!
-                        mob.y = Math.floor(mob.y + 0.5) + 0.5; 
+                        mob.y = Math.floor(mob.y - 0.5) + 0.5; 
                         mob.vy = 0; mob.isGrounded = true; 
                         break; 
                     } else { 
