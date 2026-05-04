@@ -8,7 +8,7 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 
 class SimpleNoise {
     constructor(seed = 1) { this.seed = seed; }
-    random(x, z) { let n = x * 331 + z * 337 + this.seed; n = (n << 13) ^ n; return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0); }
+    random(x, z) { let n = Math.floor(x) * 331 + Math.floor(z) * 337 + this.seed; n = (n << 13) ^ n; return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0); }
     getNoise(x, z) {
         const intX = Math.floor(x); const intZ = Math.floor(z); const fractX = x - intX; const fractZ = z - intZ;
         const v1 = this.random(intX, intZ); const v2 = this.random(intX + 1, intZ); const v3 = this.random(intX, intZ + 1); const v4 = this.random(intX + 1, intZ + 1);
@@ -17,7 +17,8 @@ class SimpleNoise {
     }
 }
 
-const Y_OFFSET = 30;
+// ✨ THE FIX: Match the Client's World.js exactly.
+const Y_OFFSET = 30; 
 
 function getBlockAt(x, y, z, seed, customBlocks) {
     const bx = Math.floor(x); const by = Math.floor(y); const bz = Math.floor(z);
@@ -27,13 +28,12 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     const noise = new SimpleNoise(seed); const rough = new SimpleNoise(seed + 1337); const trees = new SimpleNoise(seed + 888);
     const tempMap = new SimpleNoise(seed + 555);
     
+    // Server calculates noise, then adds the offset to find the real 3D rendering height.
     let rawElevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
-    let trueElevation = rawElevation - Y_OFFSET;
-    let temp = tempMap.getNoise(bx * 0.005, bz * 0.005);
-    let isTundra = temp < -0.25;
+    let trueElevation = rawElevation + Y_OFFSET; 
+    let isTundra = tempMap.getNoise(bx * 0.005, bz * 0.005) < -0.25;
     
     if (by <= trueElevation) return 'stone';
-    // Ensure trees DO NOT spawn in the Tundra/Snow biomes
     if (!isTundra && by > trueElevation && by <= trueElevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
     return 'air';
 }
@@ -62,8 +62,9 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
 }
 
 function getTrueSurfaceY(x, z, seed, customBlocks) {
-    for(let y = 30; y >= -30; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
-    return -28; 
+    // Search downward from Y=80 (Above offset)
+    for(let y = 80; y >= 0; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
+    return Y_OFFSET; 
 }
 
 const sessions = {}; let globalIdCounter = 0;
@@ -82,7 +83,7 @@ io.on('connection', (socket) => {
 
     function joinRoom(socket, roomId, playerName) {
         socket.join(roomId); socket.roomId = roomId; const room = sessions[roomId];
-        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: 10, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
+        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: Y_OFFSET + 10, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
         socket.emit('world_snapshot', { seed: room.seed, players: room.players, blocks: room.blocks, drops: room.drops, mobs: room.mobs, ageInSeconds: (Date.now() - room.startTime) / 1000, isHost: socket.id === room.hostId });
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
@@ -113,7 +114,7 @@ setInterval(() => {
         const dayTime = ((now - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
         if (Object.keys(room.mobs).length < 15 && (now - room.lastSpawnTime > 2500)) {
-            const spawnChance = isDay ? 0.01 : 0.1; // Vastly reduced day spawns
+            const spawnChance = isDay ? 0.01 : 0.1; 
             if (Math.random() < spawnChance) {
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
                 const angle = Math.random() * Math.PI * 2; const dist = 25 + Math.random() * 15; 
@@ -122,7 +123,7 @@ setInterval(() => {
 
                 if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air' && getBlockAt(mx, my+2, mz, room.seed, room.blocks) === 'air') { 
                     const id = 'mob_' + globalIdCounter++; 
-                    const isZombie = Math.random() > 0.20; // 80% Zombie, 20% Archer
+                    const isZombie = Math.random() > 0.20; 
                     const faceType = isZombie ? 'zombie_face' : 'archer_face';
                     const zombieWeapons = ['none', 'wooden_sword', 'stone_sword', 'wooden_axe', 'stone_pickaxe', 'wooden_shovel'];
                     const archerWeapons = ['bow', 'crossbow', 'gun'];
@@ -148,7 +149,6 @@ setInterval(() => {
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
             mob.isBurning = false; const mobSpeed = mob.type === 'zombie' ? 4.5 : 3.5;
 
-            // SUNBURN FIX: Checks above head for blocks
             let hasRoof = false;
             for(let ty = Math.floor(mob.y); ty < Math.floor(mob.y)+20; ty++) { if(getBlockAt(mob.x, ty, mob.z, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } }
             
@@ -158,7 +158,7 @@ setInterval(() => {
                     mob.health -= 5; io.in(roomId).emit('mobDamaged', { id: mob.id, kbDir: {x:0, y:0, z:0} });
                     if (mob.health <= 0) { 
                         delete room.mobs[mobId]; 
-                        io.in(roomId).emit('mobDespawned', mobId); // SILENT REMOVAL. NO CHAT SPAM!
+                        io.in(roomId).emit('mobDespawned', mobId); 
                         continue; 
                     }
                 }
@@ -208,7 +208,7 @@ setInterval(() => {
                 mob.z -= targetZ; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
 
-            // PURE GRAVITY: If no block is hit, they fall into the pit!
+            // PURE GRAVITY: Mobs fall into pits naturally!
             mob.vy -= 25.0 * 0.05; 
             let nextY = mob.y + (mob.vy * 0.05);
             
@@ -225,6 +225,7 @@ setInterval(() => {
                 mob.isGrounded = false;
             }
 
+            // ✨ SILENT DESPAWN: Removes from screen without Chat Spam!
             if (minD > 45 || mob.y < -35) { 
                 delete room.mobs[mobId]; 
                 io.in(roomId).emit('mobDespawned', mobId); 
