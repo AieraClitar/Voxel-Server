@@ -24,7 +24,6 @@ io.on('connection', (socket) => {
 
     broadcastLobby();
 
-    // 1. HOST A NEW WORLD
     socket.on('createGame', (playerName) => {
         const roomId = socket.id; 
         sessions[roomId] = { 
@@ -111,17 +110,18 @@ io.on('connection', (socket) => {
     });
 
     // ✨ ANTI-DUPLICATION VALIDATION
-    socket.on('pickupDrop', (data) => {
-        if(socket.roomId && sessions[socket.roomId]) {
-            // ONLY grant the item if it actually still exists on the server!
-            if (sessions[socket.roomId].drops[data.id]) {
-                delete sessions[socket.roomId].drops[data.id];
-                
-                // 1. Tell the player who picked it up to add it to their inventory
-                socket.emit('pickupSuccess', data.type);
-                // 2. Tell everyone to remove the mesh from the ground
-                io.in(socket.roomId).emit('item_removed', data.id);
-            }
+    socket.on('pickupDrop', (dropId) => {
+        const room = sessions[socket.roomId];
+        if(room && room.drops[dropId]) {
+            const itemType = room.drops[dropId].type;
+            
+            // ATOMIC DELETE: Ensure it can only be picked up once
+            delete room.drops[dropId]; 
+            
+            // 1. Tell the specific player to add it to their inventory
+            socket.emit('pickupSuccess', itemType);
+            // 2. Tell everyone to remove the mesh from the ground
+            io.in(socket.roomId).emit('item_removed', dropId);
         }
     });
 
@@ -133,6 +133,13 @@ io.on('connection', (socket) => {
             io.in(socket.roomId).emit('item_spawned', dropData); 
         }
     });
+
+    // Send a Hard-Sync every 5 seconds to ensure clients didn't miss packets
+    setInterval(() => {
+        for (let roomId in sessions) {
+            io.to(roomId).emit('hard_sync', { blocks: sessions[roomId].blocks });
+        }
+    }, 5000);
 
     socket.on('mobSync', (mobData) => {
         if(socket.roomId && sessions[socket.roomId]) {
