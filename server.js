@@ -65,7 +65,7 @@ function getBlockAt(x, y, z, seed, customBlocks) {
 function checkCollisionServer(x, y, z, seed, customBlocks) {
     const radius = 0.25; 
     const feetY = y; 
-    const headY = y + 1.7;
+    const headY = y + 1.7; 
     
     const pMinX = Math.floor(x - radius + 0.5); 
     const pMaxX = Math.floor(x + radius + 0.5); 
@@ -78,7 +78,7 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
         for (let by = pMinY; by <= pMaxY; by++) {
             for (let bz = pMinZ; bz <= pMaxZ; bz++) {
                 const type = getBlockAt(bx, by, bz, seed, customBlocks);
-                if (type !== 'air' && type !== 'water' && type !== 'torch') {
+                if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
                     if (feetY < by + 0.5 && headY > by - 0.5) return true;
                 }
             }
@@ -94,22 +94,32 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     return true;
 }
 
-// ✨ THE FIX: Scans dynamically relative to the player's height. 
-// It returns the VERY FIRST solid surface it hits, completely ignoring the invisible void below the crust!
-function getValidSpawnY(x, startY, z, seed, customBlocks) {
-    for (let y = Math.floor(startY); y >= -30; y--) {
+// ✨ THE FIX: Explicitly ignores leaves when looking for a spawn floor.
+function getValidSpawnY(x, z, seed, customBlocks) {
+    let validFloors = [];
+    for (let y = -28; y <= 60; y++) {
         const type = getBlockAt(x, y, z, seed, customBlocks);
         
-        // Find a solid block to stand on
-        if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
+        // Find a solid ground block
+        if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves' && type !== 'wood') {
+            
             const blockAbove1 = getBlockAt(x, y + 1, z, seed, customBlocks);
             const blockAbove2 = getBlockAt(x, y + 2, z, seed, customBlocks);
             
-            if ((blockAbove1 === 'air' || blockAbove1 === 'torch') && 
+            // Allow spawns even if they are under leaves
+            if ((blockAbove1 === 'air' || blockAbove1 === 'torch' || blockAbove1 === 'leaves') && 
                 (blockAbove2 === 'air' || blockAbove2 === 'torch' || blockAbove2 === 'leaves')) {
-                return y; // Immediate return guarantees top-most surface relative to player
+                validFloors.push(y);
             }
         }
+    }
+    
+    if (validFloors.length > 0) {
+        // Highly bias towards the surface (the highest valid floor)
+        if (Math.random() > 0.3) {
+            return validFloors[validFloors.length - 1]; // Pick the highest floor
+        }
+        return validFloors[Math.floor(Math.random() * validFloors.length)]; // Randomly pick a cave
     }
     return null;
 }
@@ -169,9 +179,7 @@ setInterval(() => {
                 const mx = targetPlayer.x + Math.cos(angle) * dist; 
                 const mz = targetPlayer.z + Math.sin(angle) * dist;
                 
-                // ✨ Start the scan exactly 15 blocks above the player to lock onto the current rendering layer
-                const startY = targetPlayer.y + 15;
-                const floorY = getValidSpawnY(mx, startY, mz, room.seed, room.blocks);
+                const floorY = getValidSpawnY(mx, mz, room.seed, room.blocks);
 
                 if (floorY !== null) { 
                     const id = 'mob_' + globalIdCounter++; 
@@ -209,9 +217,7 @@ setInterval(() => {
                 if (Math.random() < 0.1) {
                     mob.health -= 5; io.in(roomId).emit('mobDamaged', { id: mob.id, kbDir: {x:0, y:0, z:0} });
                     if (mob.health <= 0) { 
-                        delete room.mobs[mobId]; 
-                        io.in(roomId).emit('mobDespawned', mobId); 
-                        continue; 
+                        delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); continue; 
                     }
                 }
             }
@@ -226,8 +232,9 @@ setInterval(() => {
                 const angle = Math.atan2(closestPlayer.x - mob.x, closestPlayer.z - mob.z); mob.ry = angle;
                 
                 if (mob.type === 'zombie') {
-                    if (minD > 1.8) { targetX = Math.sin(angle) * mobSpeed * 0.05; targetZ = Math.cos(angle) * mobSpeed * 0.05; mob.isMoving = true; mob.isAttacking = false; } 
-                    else {
+                    if (minD > 1.8) { 
+                        targetX = Math.sin(angle) * mobSpeed * 0.05; targetZ = Math.cos(angle) * mobSpeed * 0.05; mob.isMoving = true; mob.isAttacking = false; 
+                    } else {
                         mob.isMoving = false;
                         if (mob.attackTimer <= 0) { 
                             mob.attackTimer = 1.5; mob.isAttacking = true; 
@@ -236,9 +243,14 @@ setInterval(() => {
                         } else mob.isAttacking = false;
                     }
                 } else if (mob.type === 'archer') {
-                    if (minD > 12.0) { targetX = Math.sin(angle) * mobSpeed * 0.05; targetZ = Math.cos(angle) * mobSpeed * 0.05; mob.isMoving = true; mob.isAttacking = false; } 
-                    else if (minD < 6.0) { targetX = -Math.sin(angle) * mobSpeed * 0.05; targetZ = -Math.cos(angle) * mobSpeed * 0.05; mob.isMoving = true; mob.isAttacking = false; } 
-                    else { mob.isMoving = false; }
+                    // ✨ SMART ARCHERS: They back up if you get too close (under 6 blocks) and approach if you are far (over 12 blocks)
+                    if (minD > 12.0) { 
+                        targetX = Math.sin(angle) * mobSpeed * 0.05; targetZ = Math.cos(angle) * mobSpeed * 0.05; mob.isMoving = true; mob.isAttacking = false; 
+                    } else if (minD < 6.0) { 
+                        targetX = -Math.sin(angle) * mobSpeed * 0.05; targetZ = -Math.cos(angle) * mobSpeed * 0.05; mob.isMoving = true; mob.isAttacking = false; 
+                    } else { 
+                        mob.isMoving = false; 
+                    }
                     
                     if (minD <= 20.0 && mob.attackTimer <= 0 && los) { 
                         mob.attackTimer = mob.weapon === 'gun' ? 1.5 : 3.0; mob.isAttacking = true; 
@@ -255,13 +267,26 @@ setInterval(() => {
                 mob.isAttacking = false; 
             }
 
+            // ✨ PATHFINDING FIX: Jump over blocks if walking into a wall
             mob.x += targetX;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
-                mob.x -= targetX; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
+                mob.x -= targetX; 
+                if (mob.isGrounded && mob.isMoving) {
+                    // Check if the block above the wall is empty. If yes, JUMP!
+                    if (!checkCollisionServer(mob.x + targetX, mob.y + 1.5, mob.z, room.seed, room.blocks)) {
+                        mob.vy = 8.5; mob.isGrounded = false;
+                    }
+                }
             }
+            
             mob.z += targetZ;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
-                mob.z -= targetZ; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
+                mob.z -= targetZ; 
+                if (mob.isGrounded && mob.isMoving) {
+                    if (!checkCollisionServer(mob.x, mob.y + 1.5, mob.z + targetZ, room.seed, room.blocks)) {
+                        mob.vy = 8.5; mob.isGrounded = false;
+                    }
+                }
             }
 
             let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water';
