@@ -5,46 +5,38 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Enable CORS with explicit methods to guarantee connections
 const io = new Server(server, { 
-    cors: { 
-        origin: "*",
-        methods: ["GET", "POST"] 
-    } 
+    cors: { origin: "*", methods: ["GET", "POST"] } 
 });
 
-// Store active worlds/rooms
 const sessions = {}; 
 
 io.on('connection', (socket) => {
     console.log('Player connected:', socket.id);
     
-    // Function to send the list of active worlds to everyone
     const broadcastLobby = () => {
         const activeWorlds = Object.keys(sessions).map(id => ({ 
-            id: id, 
-            hostName: sessions[id].hostName, 
-            playerCount: Object.keys(sessions[id].players).length 
+            id: id, hostName: sessions[id].hostName, playerCount: Object.keys(sessions[id].players).length 
         }));
         io.emit('lobbyUpdate', activeWorlds);
     };
 
-    // Send the lobby list immediately when someone opens the menu
     broadcastLobby();
 
-    // 1. HOST A NEW WORLD
+    // 1. HOST A NEW WORLD (Becomes the Server Authority)
     socket.on('createGame', (playerName) => {
-        const roomId = socket.id; // Host's socket ID is the room ID
+        const roomId = socket.id; 
         sessions[roomId] = { 
+            hostId: socket.id, 
             hostName: playerName || "Guest", 
             players: {}, 
-            startTime: Date.now() // Track when the world started for Time Sync
+            startTime: Date.now()
         };
         joinRoom(socket, roomId, playerName);
-        broadcastLobby(); // Update menu for everyone else
+        broadcastLobby(); 
     });
 
-    // 2. JOIN AN EXISTING WORLD
+    // 2. JOIN AN EXISTING WORLD (Becomes a Client)
     socket.on('joinGame', (data) => {
         if(sessions[data.roomId]) {
             joinRoom(socket, data.roomId, data.playerName);
@@ -52,39 +44,46 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Handle the actual room joining logic
     function joinRoom(socket, roomId, playerName) {
         socket.join(roomId);
         socket.roomId = roomId;
         const room = sessions[roomId];
 
-        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: 30, z: 16, ry: 0, rx: 0 };
+        // Advanced State Tracking
+        room.players[socket.id] = { 
+            name: playerName || "Guest", 
+            x: 16, y: 30, z: 16, ry: 0, rx: 0,
+            heldItem: null, isAttacking: false, health: 100
+        };
 
-        // Send current room state AND the age of the world for Day/Night sync
         socket.emit('currentPlayers', {
             players: room.players,
-            ageInSeconds: (Date.now() - room.startTime) / 1000 
+            ageInSeconds: (Date.now() - room.startTime) / 1000,
+            isHost: socket.id === room.hostId // Inform the client if they control the AI
         });
 
-        // Tell everyone else in THIS SPECIFIC ROOM that someone joined
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
 
-    // 3. MOVEMENT & BLOCKS (Now isolated to the specific room)
+    // 3. PLAYER SYNC (Now handles animations, health, and inventory)
     socket.on('move', (data) => {
         if(socket.roomId && sessions[socket.roomId]) {
             const player = sessions[socket.roomId].players[socket.id];
-            
-            // ✨ BUG FIX: Update the coordinates, but PRESERVE the name!
-            if (player) {
-                player.x = data.x;
-                player.y = data.y;
-                player.z = data.z;
-                player.ry = data.ry;
-                player.rx = data.rx;
-            }
-            
+            if (player) Object.assign(player, data);
             socket.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data });
+        }
+    });
+
+    // 4. AUTHORITATIVE MOB SYNC (Host to Clients)
+    socket.on('mobSync', (mobData) => {
+        if(socket.roomId) socket.to(socket.roomId).emit('mobSync', mobData);
+    });
+
+    // 5. COMBAT SYNC (Clients requesting to damage a Host's mob)
+    socket.on('clientHitMob', (data) => {
+        if(socket.roomId && sessions[socket.roomId]) {
+            const hostId = sessions[socket.roomId].hostId;
+            io.to(hostId).emit('mobDamagedByClient', data);
         }
     });
 
@@ -92,7 +91,6 @@ io.on('connection', (socket) => {
         if(socket.roomId) socket.to(socket.roomId).emit('blockUpdate', data);
     });
 
-    // 4. CLEAN UP ON DISCONNECT
     socket.on('disconnect', () => {
         console.log('Player disconnected:', socket.id);
         if(socket.roomId && sessions[socket.roomId]) {
@@ -100,12 +98,12 @@ io.on('connection', (socket) => {
             delete room.players[socket.id];
             socket.to(socket.roomId).emit('playerDisconnected', socket.id);
 
-            // If the HOST left, destroy the room
-            if(socket.roomId === socket.id) {
+            // If the Authority leaves, the room closes
+            if(room.hostId === socket.id) {
                 socket.to(socket.roomId).emit('hostLeft');
                 delete sessions[socket.roomId];
             }
-            broadcastLobby(); // Update player counts on menu
+            broadcastLobby(); 
         }
     });
 });
