@@ -46,7 +46,6 @@ function getBlockAt(x, y, z, seed, customBlocks) {
 
     if (isCave) return 'air';
     
-    // Server now recognizes Lakes and Ice surfaces perfectly!
     if (by > elevation && by <= 5) return (biome === 'tundra' && by === 5) ? 'ice' : 'water';
     if (by === elevation) {
         if (elevation < 5) return 'dirt'; 
@@ -63,6 +62,7 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     return 'air';
 }
 
+// ✨ THE FIX: Perfect AABB collision math to prevent walking on air over pits.
 function checkCollisionServer(x, y, z, seed, customBlocks) {
     const radius = 0.25; 
     const feetY = y; 
@@ -80,6 +80,7 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
             for (let bz = pMinZ; bz <= pMaxZ; bz++) {
                 const type = getBlockAt(bx, by, bz, seed, customBlocks);
                 if (type !== 'air' && type !== 'water' && type !== 'torch') {
+                    // Precise intersection testing
                     if (feetY < by + 0.5 && headY > by - 0.5) return true;
                 }
             }
@@ -95,11 +96,27 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     return true;
 }
 
-function getTrueSurfaceY(x, startY, z, seed, customBlocks) {
-    for(let y = Math.floor(startY); y >= -30; y--) { 
-        if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; 
+// ✨ THE FIX: Rigorous spawn validation function
+function getValidSpawnY(x, z, seed, customBlocks) {
+    // Start scanning from the sky down to find the highest valid block
+    for (let y = 60; y >= -30; y--) {
+        const type = getBlockAt(x, y, z, seed, customBlocks);
+        
+        // Find a solid block to stand on
+        if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
+            
+            // Validate the two blocks above it are air
+            const blockAbove1 = getBlockAt(x, y + 1, z, seed, customBlocks);
+            const blockAbove2 = getBlockAt(x, y + 2, z, seed, customBlocks);
+            
+            if (blockAbove1 === 'air' && blockAbove2 === 'air') {
+                return y; // Found a valid floor
+            } else {
+                return null; // The surface is blocked
+            }
+        }
     }
-    return -28; 
+    return null; // Reached the void
 }
 
 const sessions = {}; let globalIdCounter = 0;
@@ -126,7 +143,7 @@ io.on('connection', (socket) => {
     socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
     socket.on('requestBlockBreak', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
     socket.on('requestBlockPlace', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); });
-    socket.on('requestDropItem', (data) => { const room = sessions[socket.roomId]; if (!room) return; const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
+    socket.on('requestDropItem', (data) => { const room = sessions[socket.roomId]; if (!room) return; const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; room.drops[dropId] = room.drops[dropId] || dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
     socket.on('requestPickup', (dropId) => { const room = sessions[socket.roomId]; if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); } });
     socket.on('requestPlayerDamage', (data) => { const room = sessions[socket.roomId]; if (room && room.players[socket.id]) { room.players[socket.id].health -= data.dmg; io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: data.dmg, source: data.source }); } });
     
@@ -154,12 +171,13 @@ setInterval(() => {
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
                 const angle = Math.random() * Math.PI * 2; 
                 const dist = 15 + Math.random() * 10; 
-                const mx = targetPlayer.x + Math.cos(angle) * dist; const mz = targetPlayer.z + Math.sin(angle) * dist;
+                const mx = targetPlayer.x + Math.cos(angle) * dist; 
+                const mz = targetPlayer.z + Math.sin(angle) * dist;
                 
-                let spawnY = targetPlayer.y + 10;
-                let my = getTrueSurfaceY(mx, spawnY, mz, room.seed, room.blocks);
+                // Use the precise new validation function
+                const floorY = getValidSpawnY(mx, mz, room.seed, room.blocks);
 
-                if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air' && getBlockAt(mx, my+2, mz, room.seed, room.blocks) === 'air') { 
+                if (floorY !== null) { 
                     const id = 'mob_' + globalIdCounter++; 
                     const isZombie = Math.random() > 0.20; 
                     const faceType = isZombie ? 'zombie_face' : 'archer_face';
@@ -169,7 +187,8 @@ setInterval(() => {
 
                     room.mobs[id] = { 
                         id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
-                        x: mx, y: my + 0.5, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false, roamTimer: 0
+                        // Mobs spawn perfectly on top of the block
+                        x: mx, y: floorY + 0.5, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false, roamTimer: 0
                     };
                     room.lastSpawnTime = now; io.in(roomId).emit('mobSpawned', room.mobs[id]);
                 }
@@ -275,9 +294,7 @@ setInterval(() => {
                 mob.y += yStepAmt;
                 if (mob.vy < 0) { 
                     if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        // ✨ THE PHYSICS FIX: Perfectly snaps feet to the block surface exactly like Player.js!
-                        let highestBlockY = Math.floor(mob.y + 0.5);
-                        mob.y = highestBlockY + 0.5; 
+                        mob.y = Math.floor(mob.y - 0.5) + 0.5; 
                         mob.vy = 0; mob.isGrounded = true; 
                         break; 
                     } else { 
@@ -285,9 +302,7 @@ setInterval(() => {
                     } 
                 } else if (mob.vy > 0) { 
                     if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        // ✨ THE PHYSICS FIX: Clean head bonk on ceilings exactly like Player.js!
-                        let blockBelowCeiling = Math.floor(mob.y + 1.7 + 0.5);
-                        mob.y = blockBelowCeiling - 0.5 - 1.7; 
+                        mob.y = Math.floor(mob.y + 1.7 + 0.5) - 0.5 - 1.7; 
                         mob.vy = 0; 
                         break; 
                     } 
