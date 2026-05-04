@@ -46,17 +46,13 @@ function getBlockAt(x, y, z, seed, customBlocks) {
 
     if (isCave) return 'air';
     
-    // ✨ THE FIX: Everything above elevation is processed here so the sky is explicitly AIR.
     if (by > elevation) {
         if (by <= 5) return (biome === 'tundra' && by === 5) ? 'ice' : 'water';
-        
         let isTundra = biome === 'tundra';
         if (!isTundra && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
-        
-        return 'air'; // This single line fixes the entire surface spawner.
+        return 'air'; 
     }
 
-    // Exactly at the surface
     if (by === elevation) {
         if (elevation < 5) return 'dirt'; 
         if (biome === 'desert') return 'sand';
@@ -64,10 +60,7 @@ function getBlockAt(x, y, z, seed, customBlocks) {
         return elevation <= 6 ? 'sand' : 'grass';
     }
     
-    // Sub-surface layer
     if (by > elevation - 3 && by !== -30) return biome === 'desert' ? 'sand' : 'dirt';
-    
-    // Deep underground
     return 'stone';
 }
 
@@ -107,12 +100,9 @@ function getValidSpawnY(x, z, seed, customBlocks) {
     let validFloors = [];
     for (let y = -28; y <= 60; y++) {
         const type = getBlockAt(x, y, z, seed, customBlocks);
-        
         if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves' && type !== 'wood') {
-            
             const blockAbove1 = getBlockAt(x, y + 1, z, seed, customBlocks);
             const blockAbove2 = getBlockAt(x, y + 2, z, seed, customBlocks);
-            
             if ((blockAbove1 === 'air' || blockAbove1 === 'torch' || blockAbove1 === 'leaves') && 
                 (blockAbove2 === 'air' || blockAbove2 === 'torch' || blockAbove2 === 'leaves')) {
                 validFloors.push(y);
@@ -121,9 +111,7 @@ function getValidSpawnY(x, z, seed, customBlocks) {
     }
     
     if (validFloors.length > 0) {
-        if (Math.random() > 0.3) {
-            return validFloors[validFloors.length - 1]; // Highly favor spawning on the highest surface
-        }
+        if (Math.random() > 0.3) return validFloors[validFloors.length - 1]; 
         return validFloors[Math.floor(Math.random() * validFloors.length)]; 
     }
     return null;
@@ -178,6 +166,7 @@ setInterval(() => {
         if (Object.keys(room.mobs).length < 25 && (now - room.lastSpawnTime > 1000)) {
             const spawnChance = isDay ? 0.2 : 0.6; 
             if (Math.random() < spawnChance) {
+                // Find ANY player to spawn near, even if they are dead, so the world doesn't empty out
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
                 const angle = Math.random() * Math.PI * 2; 
                 const dist = 15 + Math.random() * 15; 
@@ -206,16 +195,24 @@ setInterval(() => {
         for (let mobId in room.mobs) {
             let mob = room.mobs[mobId]; let closestPlayer = null; let minD = 9999;
             for (let pid in room.players) {
-                let p = room.players[pid]; if (p.health <= 0) continue;
+                let p = room.players[pid]; 
+                if (p.health <= 0) continue; // Don't target dead players
                 let d = Math.sqrt(Math.pow(p.x - mob.x, 2) + Math.pow(p.y - mob.y, 2) + Math.pow(p.z - mob.z, 2));
                 if (d < minD) { minD = d; closestPlayer = {id: pid, ...p}; }
             }
 
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
-            mob.isBurning = false; const mobSpeed = mob.type === 'zombie' ? 4.5 : 3.5;
+            
+            // ✨ THE FIX: We severely nerfed zombie speed so you can outrun them.
+            const mobSpeed = mob.type === 'zombie' ? 2.5 : 2.0; 
 
+            mob.isBurning = false; 
             let hasRoof = false;
-            for(let ty = Math.floor(mob.y); ty < Math.floor(mob.y)+20; ty++) { if(getBlockAt(mob.x, ty, mob.z, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } }
+            
+            // ✨ THE FIX: Start checking for a roof ABOVE the zombie's head (y+2), not at its feet!
+            for(let ty = Math.floor(mob.y) + 2; ty < Math.floor(mob.y) + 30; ty++) { 
+                if(getBlockAt(mob.x, ty, mob.z, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } 
+            }
             
             if (mob.type === 'zombie' && isDay && !hasRoof) {
                 mob.isBurning = true; 
@@ -318,7 +315,16 @@ setInterval(() => {
                 }
             }
 
-            if (minD > 60 || mob.y < -35) { 
+            // ✨ THE FIX: We check if they are further than 60 blocks from ALL players, not just the nearest "alive" player.
+            // This prevents them from despawning when you die.
+            let nearestDistToAnyPlayer = 9999;
+            for (let pid in room.players) {
+                let p = room.players[pid];
+                let d = Math.sqrt(Math.pow(p.x - mob.x, 2) + Math.pow(p.y - mob.y, 2) + Math.pow(p.z - mob.z, 2));
+                if (d < nearestDistToAnyPlayer) nearestDistToAnyPlayer = d;
+            }
+
+            if (nearestDistToAnyPlayer > 60 || mob.y < -35) { 
                 delete room.mobs[mobId]; 
                 io.in(roomId).emit('mobDespawned', mobId); 
             }
