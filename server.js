@@ -8,21 +8,17 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 
 class SimpleNoise {
     constructor(seed = 1) { this.seed = seed; }
-    random(x, z) { 
-        const sin = Math.sin(Math.floor(x) * 12.9898 + Math.floor(z) * 78.233 + this.seed) * 43758.5453;
-        return sin - Math.floor(sin);
-    }
+    random(x, z) { let n = Math.floor(x) * 331 + Math.floor(z) * 337 + this.seed; n = (n << 13) ^ n; return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0); }
     getNoise(x, z) {
         const intX = Math.floor(x); const intZ = Math.floor(z); const fractX = x - intX; const fractZ = z - intZ;
         const v1 = this.random(intX, intZ); const v2 = this.random(intX + 1, intZ); const v3 = this.random(intX, intZ + 1); const v4 = this.random(intX + 1, intZ + 1);
         const fX = (1 - Math.cos(fractX * Math.PI)) * 0.5; const fZ = (1 - Math.cos(fractZ * Math.PI)) * 0.5;
         const i1 = v1 * (1 - fX) + v2 * fX; const i2 = v3 * (1 - fX) + v4 * fX;
-        return (i1 * (1 - fZ) + i2 * fZ) * 2.0 - 1.0;
+        return i1 * (1 - fractZ) + i2 * fractZ;
     }
 }
 
-const Y_OFFSET = 30;
-
+// ✨ THE FIX: Removed Y_OFFSET. The Server now uses True 3D World Coordinates (Exact 1:1 match with Client).
 function getBlockAt(x, y, z, seed, customBlocks) {
     const bx = Math.floor(x); const by = Math.floor(y); const bz = Math.floor(z);
     const key = `${bx},${by},${bz}`;
@@ -33,22 +29,20 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     const trees = new SimpleNoise(seed + 888);
     const tempMap = new SimpleNoise(seed + 555);
     
-    let rawElevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
-    let trueElevation = rawElevation + Y_OFFSET; 
+    // Server now evaluates the height exactly as the Client renders it (No artificial +30 shift)
+    let height = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
     let isTundra = tempMap.getNoise(bx * 0.005, bz * 0.005) < -0.25;
     
-    if (by <= trueElevation) return 'stone';
-    if (!isTundra && by > trueElevation && by <= trueElevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
+    if (by <= height) return 'stone';
+    if (!isTundra && by > height && by <= height + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
     return 'air';
 }
 
-// ✨ THE FIX: Exact replica of the Client's physics bounding box.
 function checkCollisionServer(x, y, z, seed, customBlocks) {
     const radius = 0.25; 
     const feetY = y; 
-    const headY = y + 1.7; // Mobs are roughly 1.7 units tall
+    const headY = y + 1.7;
     
-    // Add the 0.5 to align with the center of the block mesh
     const pMinX = Math.floor(x - radius + 0.5); 
     const pMaxX = Math.floor(x + radius + 0.5); 
     const pMinY = Math.floor(feetY + 0.5); 
@@ -61,7 +55,6 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
             for (let bz = pMinZ; bz <= pMaxZ; bz++) {
                 const type = getBlockAt(bx, by, bz, seed, customBlocks);
                 if (type !== 'air' && type !== 'water' && type !== 'torch') {
-                    // Check if they are physically inside the 1x1 voxel bounds
                     if (feetY < by + 0.5 && headY > by - 0.5) return true;
                 }
             }
@@ -98,7 +91,7 @@ io.on('connection', (socket) => {
 
     function joinRoom(socket, roomId, playerName) {
         socket.join(roomId); socket.roomId = roomId; const room = sessions[roomId];
-        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: Y_OFFSET + 10, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
+        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: 10, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
         socket.emit('world_snapshot', { seed: room.seed, players: room.players, blocks: room.blocks, drops: room.drops, mobs: room.mobs, ageInSeconds: (Date.now() - room.startTime) / 1000, isHost: socket.id === room.hostId });
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
@@ -148,7 +141,7 @@ setInterval(() => {
 
                     room.mobs[id] = { 
                         id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
-                        x: mx, y: my + 1.0, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false
+                        x: mx, y: my + 0.5, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false
                     };
                     room.lastSpawnTime = now; io.in(roomId).emit('mobSpawned', room.mobs[id]);
                 }
@@ -215,7 +208,6 @@ setInterval(() => {
                 mob.isAttacking = false; 
             }
 
-            // ✨ HORIZONTAL COLLISION (Exact mirror of Player.js)
             mob.x += targetX;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
                 mob.x -= targetX; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
@@ -225,7 +217,6 @@ setInterval(() => {
                 mob.z -= targetZ; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
 
-            // ✨ VERTICAL GRAVITY & COLLISION (Exact mirror of Player.js)
             mob.vy -= 25.0 * 0.05; 
             let yMove = mob.vy * 0.05;
             let ySteps = Math.max(1, Math.ceil(Math.abs(yMove) / 0.1)); 
@@ -235,8 +226,7 @@ setInterval(() => {
                 mob.y += yStepAmt;
                 if (mob.vy < 0) { 
                     if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        // If they hit the ground, snap exactly to the block surface (Y + 0.5)
-                        mob.y = Math.floor(mob.y - 0.5) + 0.5 + 1.7; // Headroom calculation
+                        mob.y = Math.floor(mob.y - 0.5) + 0.5 + 1.7;
                         mob.vy = 0; mob.isGrounded = true; 
                         break; 
                     } else { 
