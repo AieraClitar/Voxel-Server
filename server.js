@@ -143,7 +143,24 @@ io.on('connection', (socket) => {
     socket.on('requestBlockPlace', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); });
     socket.on('requestDropItem', (data) => { const room = sessions[socket.roomId]; if (!room) return; const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; room.drops[dropId] = room.drops[dropId] || dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
     socket.on('requestPickup', (dropId) => { const room = sessions[socket.roomId]; if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); } });
-    socket.on('requestPlayerDamage', (data) => { const room = sessions[socket.roomId]; if (room && room.players[socket.id]) { room.players[socket.id].health -= data.dmg; io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: data.dmg, source: data.source }); } });
+    
+    // ✨ THE FIX: We now broadcast when a player is killed by a mob!
+    socket.on('requestPlayerDamage', (data) => { 
+        const room = sessions[socket.roomId]; 
+        if (room && room.players[socket.id]) { 
+            room.players[socket.id].health -= data.dmg; 
+            io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: data.dmg, source: data.source }); 
+            
+            // Check if player died from this hit
+            if (room.players[socket.id].health <= 0) {
+                const playerName = room.players[socket.id].name;
+                const deathMsg = `💀 ${playerName} was slain by a ${data.source.toUpperCase()}!`;
+                
+                // We use your client's existing chat system format to send the death message
+                io.in(socket.roomId).emit('mobKilled', { mobId: 'none', killerName: deathMsg, mobType: '' });
+            }
+        } 
+    });
     
     socket.on('requestMobAttack', (data) => {
         const room = sessions[socket.roomId];
@@ -163,10 +180,20 @@ setInterval(() => {
         const room = sessions[roomId]; const playerIds = Object.keys(room.players); if (playerIds.length === 0) continue;
         const dayTime = ((now - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
+        // Count how many archers and zombies currently exist
+        let currentZombies = 0;
+        let currentArchers = 0;
+        for (let m in room.mobs) {
+            if (room.mobs[m].type === 'zombie') currentZombies++;
+            else if (room.mobs[m].type === 'archer') currentArchers++;
+        }
+
         if (Object.keys(room.mobs).length < 25 && (now - room.lastSpawnTime > 1000)) {
-            const spawnChance = isDay ? 0.2 : 0.6; 
+            // ✨ THE FIX: Massive spawn rate balancing.
+            // Day time: very rare spawns (0.05). Night time: normal spawns (0.4).
+            const spawnChance = isDay ? 0.05 : 0.4; 
+            
             if (Math.random() < spawnChance) {
-                // Find ANY player to spawn near, even if they are dead, so the world doesn't empty out
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
                 const angle = Math.random() * Math.PI * 2; 
                 const dist = 15 + Math.random() * 15; 
@@ -177,7 +204,22 @@ setInterval(() => {
 
                 if (floorY !== null) { 
                     const id = 'mob_' + globalIdCounter++; 
-                    const isZombie = Math.random() > 0.20; 
+                    
+                    // ✨ THE FIX: Balancing Mob Types.
+                    // If it's night, make sure the archer cap isn't exceeded (e.g., max 6 archers).
+                    // If it's day, heavily favor zombies since they burn up quickly.
+                    let isZombie;
+                    if (isDay) {
+                        isZombie = true; // Mostly zombies during the day so they can burn
+                    } else {
+                        // At night, only spawn archer if there are fewer than 6 alive, otherwise force zombie
+                        if (currentArchers < 6) {
+                            isZombie = Math.random() > 0.35; // 35% chance for archer at night
+                        } else {
+                            isZombie = true; 
+                        }
+                    }
+
                     const faceType = isZombie ? 'zombie_face' : 'archer_face';
                     const zombieWeapons = ['none', 'wooden_sword', 'stone_sword', 'wooden_axe', 'stone_pickaxe', 'wooden_shovel'];
                     const archerWeapons = ['bow', 'crossbow', 'gun'];
@@ -196,20 +238,17 @@ setInterval(() => {
             let mob = room.mobs[mobId]; let closestPlayer = null; let minD = 9999;
             for (let pid in room.players) {
                 let p = room.players[pid]; 
-                if (p.health <= 0) continue; // Don't target dead players
+                if (p.health <= 0) continue; 
                 let d = Math.sqrt(Math.pow(p.x - mob.x, 2) + Math.pow(p.y - mob.y, 2) + Math.pow(p.z - mob.z, 2));
                 if (d < minD) { minD = d; closestPlayer = {id: pid, ...p}; }
             }
 
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
-            
-            // ✨ THE FIX: We severely nerfed zombie speed so you can outrun them.
             const mobSpeed = mob.type === 'zombie' ? 2.5 : 2.0; 
 
             mob.isBurning = false; 
             let hasRoof = false;
             
-            // ✨ THE FIX: Start checking for a roof ABOVE the zombie's head (y+2), not at its feet!
             for(let ty = Math.floor(mob.y) + 2; ty < Math.floor(mob.y) + 30; ty++) { 
                 if(getBlockAt(mob.x, ty, mob.z, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } 
             }
@@ -241,7 +280,17 @@ setInterval(() => {
                         if (mob.attackTimer <= 0) { 
                             mob.attackTimer = 1.5; mob.isAttacking = true; 
                             let dmg = 10; if(mob.weapon.includes('sword')) dmg = 25; else if(mob.weapon.includes('axe')) dmg = 20; else if(mob.weapon !== 'none') dmg = 15;
-                            room.players[closestPlayer.id].health -= dmg; io.in(roomId).emit('playerDamaged', { id: closestPlayer.id, dmg: dmg, source: 'Zombie' }); 
+                            // ✨ FIX: Request damage exactly as it triggers the death broadcast check above
+                            room.players[closestPlayer.id].health -= dmg; 
+                            
+                            // Send standard damage packet (which triggers local screen shake)
+                            io.in(roomId).emit('playerDamaged', { id: closestPlayer.id, dmg: dmg, source: 'Zombie' }); 
+                            
+                            // Immediately check and broadcast death feed
+                            if (room.players[closestPlayer.id].health <= 0) {
+                                io.in(roomId).emit('mobKilled', { mobId: 'none', killerName: `💀 ${room.players[closestPlayer.id].name} was mauled by a ZOMBIE!`, mobType: '' });
+                            }
+
                         } else mob.isAttacking = false;
                     }
                 } else if (mob.type === 'archer') {
@@ -315,8 +364,6 @@ setInterval(() => {
                 }
             }
 
-            // ✨ THE FIX: We check if they are further than 60 blocks from ALL players, not just the nearest "alive" player.
-            // This prevents them from despawning when you die.
             let nearestDistToAnyPlayer = 9999;
             for (let pid in room.players) {
                 let p = room.players[pid];
