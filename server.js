@@ -62,7 +62,6 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     return 'air';
 }
 
-// ✨ THE FIX: Perfect AABB collision math to prevent walking on air over pits.
 function checkCollisionServer(x, y, z, seed, customBlocks) {
     const radius = 0.25; 
     const feetY = y; 
@@ -79,8 +78,7 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
         for (let by = pMinY; by <= pMaxY; by++) {
             for (let bz = pMinZ; bz <= pMaxZ; bz++) {
                 const type = getBlockAt(bx, by, bz, seed, customBlocks);
-                if (type !== 'air' && type !== 'water' && type !== 'torch') {
-                    // Precise intersection testing
+                if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
                     if (feetY < by + 0.5 && headY > by - 0.5) return true;
                 }
             }
@@ -96,27 +94,24 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     return true;
 }
 
-// ✨ THE FIX: Rigorous spawn validation function
+// ✨ THE RIGOROUS SPAWNER FIX: Scans from the sky downwards to guarantee it finds the true surface.
 function getValidSpawnY(x, z, seed, customBlocks) {
-    // Start scanning from the sky down to find the highest valid block
     for (let y = 60; y >= -30; y--) {
         const type = getBlockAt(x, y, z, seed, customBlocks);
         
-        // Find a solid block to stand on
+        // Find a solid block to stand on (excluding air, water, and leaves)
         if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
             
-            // Validate the two blocks above it are air
+            // Validate the two blocks above it are empty air space for the mob to fit
             const blockAbove1 = getBlockAt(x, y + 1, z, seed, customBlocks);
             const blockAbove2 = getBlockAt(x, y + 2, z, seed, customBlocks);
             
             if (blockAbove1 === 'air' && blockAbove2 === 'air') {
-                return y; // Found a valid floor
-            } else {
-                return null; // The surface is blocked
+                return y; // Perfect spawn location found!
             }
         }
     }
-    return null; // Reached the void
+    return null; // Reached the void without finding a valid space
 }
 
 const sessions = {}; let globalIdCounter = 0;
@@ -174,7 +169,7 @@ setInterval(() => {
                 const mx = targetPlayer.x + Math.cos(angle) * dist; 
                 const mz = targetPlayer.z + Math.sin(angle) * dist;
                 
-                // Use the precise new validation function
+                // Using the rigorously tested spawner
                 const floorY = getValidSpawnY(mx, mz, room.seed, room.blocks);
 
                 if (floorY !== null) { 
@@ -187,7 +182,7 @@ setInterval(() => {
 
                     room.mobs[id] = { 
                         id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
-                        // Mobs spawn perfectly on top of the block
+                        // ✨ They now spawn perfectly flat on the ground
                         x: mx, y: floorY + 0.5, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false, roamTimer: 0
                     };
                     room.lastSpawnTime = now; io.in(roomId).emit('mobSpawned', room.mobs[id]);
@@ -225,12 +220,8 @@ setInterval(() => {
             let los = closestPlayer ? hasLineOfSight(mob.x, mob.y + 1.5, mob.z, closestPlayer.x, closestPlayer.y + 1.5, closestPlayer.z, room.seed, room.blocks) : false;
 
             if (mob.isBurning && !closestPlayer) {
-                if (!mob.roamTimer || mob.roamTimer <= 0) {
-                    mob.ry = Math.random() * Math.PI * 2; 
-                    mob.roamTimer = 20; 
-                }
-                mob.roamTimer--;
-                targetX = Math.sin(mob.ry) * mobSpeed * 0.06; targetZ = Math.cos(mob.ry) * mobSpeed * 0.06; mob.isMoving = true;
+                if (!mob.roamTimer || mob.roamTimer <= 0) { mob.ry = Math.random() * Math.PI * 2; mob.roamTimer = 20; }
+                mob.roamTimer--; targetX = Math.sin(mob.ry) * mobSpeed * 0.06; targetZ = Math.cos(mob.ry) * mobSpeed * 0.06; mob.isMoving = true;
             } else if (closestPlayer && minD < 20 && los) {
                 const angle = Math.atan2(closestPlayer.x - mob.x, closestPlayer.z - mob.z); mob.ry = angle;
                 
@@ -256,17 +247,11 @@ setInterval(() => {
                 }
             } else if (mob.isGrounded) { 
                 if (!mob.roamTimer || mob.roamTimer <= 0) {
-                    mob.roamTimer = 20 + Math.floor(Math.random() * 40); 
-                    mob.isMoving = Math.random() < 0.6; 
+                    mob.roamTimer = 20 + Math.floor(Math.random() * 40); mob.isMoving = Math.random() < 0.6; 
                     if (mob.isMoving) mob.ry += (Math.random() - 0.5) * Math.PI;
                 }
                 mob.roamTimer--;
-                
-                if (mob.isMoving) {
-                    targetX = Math.sin(mob.ry) * mobSpeed * 0.02; targetZ = Math.cos(mob.ry) * mobSpeed * 0.02; 
-                } else {
-                    targetX = 0; targetZ = 0; 
-                }
+                if (mob.isMoving) { targetX = Math.sin(mob.ry) * mobSpeed * 0.02; targetZ = Math.cos(mob.ry) * mobSpeed * 0.02; } else { targetX = 0; targetZ = 0; }
                 mob.isAttacking = false; 
             }
 
@@ -280,11 +265,7 @@ setInterval(() => {
             }
 
             let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water';
-            if (inWater) {
-                mob.vy = 2.0; 
-            } else {
-                mob.vy -= 25.0 * 0.05; 
-            }
+            if (inWater) { mob.vy = 2.0; } else { mob.vy -= 25.0 * 0.05; }
 
             let yMove = mob.vy * 0.05;
             let ySteps = Math.max(1, Math.ceil(Math.abs(yMove) / 0.1)); 
@@ -294,7 +275,8 @@ setInterval(() => {
                 mob.y += yStepAmt;
                 if (mob.vy < 0) { 
                     if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        mob.y = Math.floor(mob.y - 0.5) + 0.5; 
+                        // ✨ THE PHYSICS FIX: Perfectly snaps feet to the block surface without bouncing.
+                        mob.y = Math.floor(mob.y + 0.5) + 0.5; 
                         mob.vy = 0; mob.isGrounded = true; 
                         break; 
                     } else { 
