@@ -8,20 +8,12 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 
 class SimpleNoise {
     constructor(seed = 1) { this.seed = seed; }
-    random(x, z) {
-        // Syncs perfectly with client
-        const sin = Math.sin(Math.floor(x) * 12.9898 + Math.floor(z) * 78.233 + this.seed) * 43758.5453;
-        return sin - Math.floor(sin);
-    }
+    random(x, z) { let n = x * 331 + z * 337 + this.seed; n = (n << 13) ^ n; return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0); }
     getNoise(x, z) {
-        const intX = Math.floor(x); const intZ = Math.floor(z);
-        const fractX = x - intX; const fractZ = z - intZ;
-        const v1 = this.random(intX, intZ); const v2 = this.random(intX + 1, intZ);
-        const v3 = this.random(intX, intZ + 1); const v4 = this.random(intX + 1, intZ + 1);
-        const fX = (1 - Math.cos(fractX * Math.PI)) * 0.5;
-        const fZ = (1 - Math.cos(fractZ * Math.PI)) * 0.5;
-        const i1 = v1 * (1 - fX) + v2 * fX; const i2 = v3 * (1 - fX) + v4 * fX;
-        return (i1 * (1 - fZ) + i2 * fZ) * 2.0 - 1.0; 
+        const intX = Math.floor(x); const intZ = Math.floor(z); const fractX = x - intX; const fractZ = z - intZ;
+        const v1 = this.random(intX, intZ); const v2 = this.random(intX + 1, intZ); const v3 = this.random(intX, intZ + 1); const v4 = this.random(intX + 1, intZ + 1);
+        const i1 = v1 * (1 - fractX) + v2 * fractX; const i2 = v3 * (1 - fractX) + v4 * fractX;
+        return i1 * (1 - fractZ) + i2 * fractZ;
     }
 }
 
@@ -33,12 +25,16 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     if (customBlocks[key]) return customBlocks[key];
     
     const noise = new SimpleNoise(seed); const rough = new SimpleNoise(seed + 1337); const trees = new SimpleNoise(seed + 888);
-    let elevation = (noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8;
-    let detail = (rough.getNoise(bx * 0.06, bz * 0.06)) * 3;
-    let height = Math.floor(elevation + detail) + 2;
+    const tempMap = new SimpleNoise(seed + 555);
     
-    if (by <= height) return 'stone';
-    if (by > height && by <= height + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
+    let rawElevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
+    let trueElevation = rawElevation - Y_OFFSET;
+    let temp = tempMap.getNoise(bx * 0.005, bz * 0.005);
+    let isTundra = temp < -0.25;
+    
+    if (by <= trueElevation) return 'stone';
+    // Ensure trees DO NOT spawn in the Tundra/Snow biomes
+    if (!isTundra && by > trueElevation && by <= trueElevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
     return 'air';
 }
 
@@ -47,7 +43,14 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
     const pMinX = Math.floor(x - radius); const pMaxX = Math.floor(x + radius);
     const pMinY = Math.floor(feetY); const pMaxY = Math.floor(headY);
     const pMinZ = Math.floor(z - radius); const pMaxZ = Math.floor(z + radius);
-    for (let bx = pMinX; bx <= pMaxX; bx++) { for (let by = pMinY; by <= pMaxY; by++) { for (let bz = pMinZ; bz <= pMaxZ; bz++) { if (getBlockAt(bx, by, bz, seed, customBlocks) !== 'air') return true; } } }
+    
+    for (let bx = pMinX; bx <= pMaxX; bx++) {
+        for (let by = pMinY; by <= pMaxY; by++) {
+            for (let bz = pMinZ; bz <= pMaxZ; bz++) {
+                if (getBlockAt(bx, by, bz, seed, customBlocks) !== 'air') return true;
+            }
+        }
+    }
     return false;
 }
 
@@ -59,7 +62,7 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
 }
 
 function getTrueSurfaceY(x, z, seed, customBlocks) {
-    for(let y = 60; y >= -30; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
+    for(let y = 30; y >= -30; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
     return -28; 
 }
 
@@ -110,7 +113,7 @@ setInterval(() => {
         const dayTime = ((now - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
         if (Object.keys(room.mobs).length < 15 && (now - room.lastSpawnTime > 2500)) {
-            const spawnChance = isDay ? 0.02 : 0.1;
+            const spawnChance = isDay ? 0.01 : 0.1; // Vastly reduced day spawns
             if (Math.random() < spawnChance) {
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
                 const angle = Math.random() * Math.PI * 2; const dist = 25 + Math.random() * 15; 
@@ -118,13 +121,17 @@ setInterval(() => {
                 let my = getTrueSurfaceY(mx, mz, room.seed, room.blocks);
 
                 if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air' && getBlockAt(mx, my+2, mz, room.seed, room.blocks) === 'air') { 
-                    const id = 'mob_' + globalIdCounter++; const isZombie = Math.random() > 0.25; 
+                    const id = 'mob_' + globalIdCounter++; 
+                    const isZombie = Math.random() > 0.20; // 80% Zombie, 20% Archer
                     const faceType = isZombie ? 'zombie_face' : 'archer_face';
-                    const zombieWeapons = ['none', 'none', 'wooden_sword', 'stone_sword', 'wooden_axe', 'stone_pickaxe', 'wooden_shovel'];
-                    const archerWeapons = ['bow', 'bow', 'crossbow', 'gun'];
+                    const zombieWeapons = ['none', 'wooden_sword', 'stone_sword', 'wooden_axe', 'stone_pickaxe', 'wooden_shovel'];
+                    const archerWeapons = ['bow', 'crossbow', 'gun'];
                     const weapon = isZombie ? zombieWeapons[Math.floor(Math.random() * zombieWeapons.length)] : archerWeapons[Math.floor(Math.random() * archerWeapons.length)];
 
-                    room.mobs[id] = { id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, x: mx, y: my + 1.0, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0 };
+                    room.mobs[id] = { 
+                        id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
+                        x: mx, y: my + 1.0, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false
+                    };
                     room.lastSpawnTime = now; io.in(roomId).emit('mobSpawned', room.mobs[id]);
                 }
             }
@@ -141,22 +148,22 @@ setInterval(() => {
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
             mob.isBurning = false; const mobSpeed = mob.type === 'zombie' ? 4.5 : 3.5;
 
-            // SUNBURN FIX: Silently remove zombie on death without spamming chat
+            // SUNBURN FIX: Checks above head for blocks
             let hasRoof = false;
-            for(let ty=Math.floor(mob.y); ty < Math.floor(mob.y)+20; ty++) { if(getBlockAt(mob.x, ty, mob.z, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } }
+            for(let ty = Math.floor(mob.y); ty < Math.floor(mob.y)+20; ty++) { if(getBlockAt(mob.x, ty, mob.z, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } }
+            
             if (mob.type === 'zombie' && isDay && !hasRoof) {
                 mob.isBurning = true; 
                 if (Math.random() < 0.1) {
                     mob.health -= 5; io.in(roomId).emit('mobDamaged', { id: mob.id, kbDir: {x:0, y:0, z:0} });
                     if (mob.health <= 0) { 
-                        io.in(roomId).emit('mobDespawned', mob.id); 
                         delete room.mobs[mobId]; 
+                        io.in(roomId).emit('mobDespawned', mobId); // SILENT REMOVAL. NO CHAT SPAM!
                         continue; 
                     }
                 }
             }
 
-            // PHYSICS & COLLISION
             let targetX = 0, targetZ = 0;
             let los = closestPlayer ? hasLineOfSight(mob.x, mob.y + 1.5, mob.z, closestPlayer.x, closestPlayer.y + 1.5, closestPlayer.z, room.seed, room.blocks) : false;
 
@@ -201,15 +208,27 @@ setInterval(() => {
                 mob.z -= targetZ; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
 
-            // VERTICAL (AABB)
+            // PURE GRAVITY: If no block is hit, they fall into the pit!
             mob.vy -= 25.0 * 0.05; 
             let nextY = mob.y + (mob.vy * 0.05);
+            
             if (checkCollisionServer(mob.x, nextY, mob.z, room.seed, room.blocks)) {
-                if (mob.vy < 0) { mob.y = Math.floor(nextY) + 1.0; mob.vy = 0; mob.isGrounded = true; } 
-                else { mob.y = Math.floor(nextY + 1.8) - 1.8; mob.vy = 0; mob.isGrounded = false; }
-            } else { mob.y = nextY; mob.isGrounded = false; }
+                if (mob.vy < 0) {
+                    mob.y = Math.floor(nextY) + 1.0; 
+                    mob.vy = 0; mob.isGrounded = true;
+                } else {
+                    mob.y = Math.floor(nextY + 1.8) - 1.8; 
+                    mob.vy = 0; mob.isGrounded = false;
+                }
+            } else {
+                mob.y = nextY;
+                mob.isGrounded = false;
+            }
 
-            if (minD > 45 || mob.y < -30) { delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); }
+            if (minD > 45 || mob.y < -35) { 
+                delete room.mobs[mobId]; 
+                io.in(roomId).emit('mobDespawned', mobId); 
+            }
         }
         io.in(roomId).emit('server_tick', { players: room.players, mobs: room.mobs });
     }
