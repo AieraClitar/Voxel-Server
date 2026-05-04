@@ -18,7 +18,6 @@ class SimpleNoise {
     }
 }
 
-// ✨ STRICT VOXEL GRID CHECKER
 function getBlockAt(x, y, z, seed, customBlocks) {
     const bx = Math.floor(x); const by = Math.floor(y); const bz = Math.floor(z);
     const key = `${bx},${by},${bz}`;
@@ -32,21 +31,35 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     return 'air';
 }
 
-// ✨ LINE OF SIGHT RAYCASTER
+// ✨ REAL SERVER COLLISION PHYSICS
+function checkCollisionServer(x, y, z, seed, customBlocks) {
+    const radius = 0.3; const feetY = y; const headY = y + 1.6;
+    const pMinX = Math.floor(x - radius); const pMaxX = Math.floor(x + radius);
+    const pMinY = Math.floor(feetY); const pMaxY = Math.floor(headY);
+    const pMinZ = Math.floor(z - radius); const pMaxZ = Math.floor(z + radius);
+    
+    for (let bx = pMinX; bx <= pMaxX; bx++) {
+        for (let by = pMinY; by <= pMaxY; by++) {
+            for (let bz = pMinZ; bz <= pMaxZ; bz++) {
+                if (getBlockAt(bx, by, bz, seed, customBlocks) !== 'air') return true;
+            }
+        }
+    }
+    return false;
+}
+
+// ✨ FIXED LINE OF SIGHT (Checks from Head to Head)
 function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     let dist = Math.sqrt(Math.pow(x2-x1, 2) + Math.pow(y2-y1, 2) + Math.pow(z2-z1, 2));
     let dx = (x2-x1)/dist; let dy = (y2-y1)/dist; let dz = (z2-z1)/dist;
-    for(let i=1; i<dist; i+=0.5) { // Step by 0.5 for accuracy
-        if (getBlockAt(x1 + dx*i, y1 + dy*i, z1 + dz*i, seed, customBlocks) !== 'air') return false;
+    for(let i=0.5; i<dist; i+=0.5) { 
+        if (getBlockAt(x1 + dx*i, y1 + dy*i, z1 + dz*i, seed, customBlocks) !== 'air') return false; 
     }
     return true;
 }
 
-// ✨ TRUE SURFACE DETECTION (Scans downward from sky)
 function getTrueSurfaceY(x, z, seed, customBlocks) {
-    for(let y = 60; y >= -10; y--) {
-        if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y;
-    }
+    for(let y = 60; y >= -20; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
     return 2;
 }
 
@@ -104,16 +117,15 @@ io.on('connection', (socket) => {
     });
 });
 
-// ✨ 20 TPS SERVER AI & PHYSICS LOOP
+// ✨ 20 TPS SERVER PHYSICS LOOP
 setInterval(() => {
     const now = Date.now();
     for (let roomId in sessions) {
         const room = sessions[roomId]; const playerIds = Object.keys(room.players); if (playerIds.length === 0) continue;
         const dayTime = ((now - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
-        // ✨ SPAWNER OPTIMIZATION: Max 1 mob every 2 seconds, max 12 total, spawn > 25 blocks away
         if (Object.keys(room.mobs).length < 12 && (now - room.lastSpawnTime > 2000)) {
-            const spawnChance = isDay ? 0.2 : 0.8;
+            const spawnChance = isDay ? 0.02 : 0.1;
             if (Math.random() < spawnChance) {
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
                 const angle = Math.random() * Math.PI * 2; const dist = 25 + Math.random() * 15; 
@@ -122,9 +134,8 @@ setInterval(() => {
 
                 if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air' && getBlockAt(mx, my+2, mz, room.seed, room.blocks) === 'air') { 
                     const id = 'mob_' + globalIdCounter++; 
-                    const isZombie = Math.random() > 0.25; // 75% Zombie, 25% Archer
+                    const isZombie = Math.random() > 0.25; 
                     const faceType = isZombie ? 'zombie_face' : 'archer_face';
-                    
                     const zombieWeapons = ['none', 'none', 'wooden_sword', 'stone_sword', 'wooden_axe', 'stone_pickaxe', 'wooden_shovel'];
                     const archerWeapons = ['bow', 'bow', 'crossbow', 'gun'];
                     const weapon = isZombie ? zombieWeapons[Math.floor(Math.random() * zombieWeapons.length)] : archerWeapons[Math.floor(Math.random() * archerWeapons.length)];
@@ -149,6 +160,7 @@ setInterval(() => {
 
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
             mob.isBurning = false;
+            const mobSpeed = mob.type === 'zombie' ? 4.5 : 3.5;
 
             // SUNBURN
             let hasRoof = false;
@@ -161,55 +173,71 @@ setInterval(() => {
                 }
             }
 
-            // ✨ STRICT GRAVITY & GROUND COLLISION
-            mob.vy -= 25.0 * 0.05; 
-            mob.y += mob.vy * 0.05;
-            let groundBlockY = getTrueSurfaceY(mob.x, mob.z, room.seed, room.blocks);
-            let groundY = groundBlockY + 0.5; // Exactly on top of the block
-
-            if (mob.y <= groundY) { mob.y = groundY; mob.vy = 0; mob.isGrounded = true; } 
-            else { mob.isGrounded = false; }
-
-            // ✨ PATHFINDING & LINE OF SIGHT
-            let los = closestPlayer ? hasLineOfSight(mob.x, mob.y+1.5, mob.z, closestPlayer.x, closestPlayer.y+1.5, closestPlayer.z, room.seed, room.blocks) : false;
+            // ✨ TRUE AABB PHYSICS ENGINE (Collision & Gravity)
+            let targetX = 0, targetZ = 0;
+            let los = closestPlayer ? hasLineOfSight(mob.x, mob.y + 1.5, mob.z, closestPlayer.x, closestPlayer.y + 1.5, closestPlayer.z, room.seed, room.blocks) : false;
 
             if (mob.isBurning && !closestPlayer) {
-                mob.ry += 0.5; mob.x += Math.sin(mob.ry) * 0.2; mob.z += Math.cos(mob.ry) * 0.2; mob.isMoving = true;
-            } else if (closestPlayer && minD < 16 && los) { // 16 block vision range
+                mob.ry += 0.5; targetX = Math.sin(mob.ry) * mobSpeed * 0.05; targetZ = Math.cos(mob.ry) * mobSpeed * 0.05; mob.isMoving = true;
+            } else if (closestPlayer && minD < 20 && los) {
                 const angle = Math.atan2(closestPlayer.x - mob.x, closestPlayer.z - mob.z); mob.ry = angle;
                 
-                // Jump over blocks
-                let frontBlock = getBlockAt(mob.x + Math.sin(angle)*0.8, mob.y + 0.5, mob.z + Math.cos(angle)*0.8, room.seed, room.blocks);
-                if (frontBlock !== 'air' && mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
-
                 if (mob.type === 'zombie') {
-                    if (minD > 1.8) { mob.x += Math.sin(angle) * 0.15; mob.z += Math.cos(angle) * 0.15; mob.isMoving = true; mob.isAttacking = false; } 
+                    if (minD > 1.8) { targetX = Math.sin(angle) * mobSpeed * 0.05; targetZ = Math.cos(angle) * mobSpeed * 0.05; mob.isMoving = true; mob.isAttacking = false; } 
                     else {
                         mob.isMoving = false;
                         if (mob.attackTimer <= 0) { 
                             mob.attackTimer = 1.5; mob.isAttacking = true; 
                             let dmg = 10; if(mob.weapon.includes('sword')) dmg = 25; else if(mob.weapon.includes('axe')) dmg = 20; else if(mob.weapon !== 'none') dmg = 15;
-                            room.players[closestPlayer.id].health -= dmg; 
-                            io.in(roomId).emit('playerDamaged', { id: closestPlayer.id, dmg: dmg, source: 'Zombie' }); 
+                            room.players[closestPlayer.id].health -= dmg; io.in(roomId).emit('playerDamaged', { id: closestPlayer.id, dmg: dmg, source: 'Zombie' }); 
                         } else mob.isAttacking = false;
                     }
                 } else if (mob.type === 'archer') {
-                    if (minD > 12.0) { mob.x += Math.sin(angle) * 0.12; mob.z += Math.cos(angle) * 0.12; mob.isMoving = true; mob.isAttacking = false; } 
-                    else if (minD < 6.0) { mob.x -= Math.sin(angle) * 0.12; mob.z -= Math.cos(angle) * 0.12; mob.isMoving = true; mob.isAttacking = false; } else { mob.isMoving = false; }
+                    if (minD > 12.0) { targetX = Math.sin(angle) * mobSpeed * 0.05; targetZ = Math.cos(angle) * mobSpeed * 0.05; mob.isMoving = true; mob.isAttacking = false; } 
+                    else if (minD < 6.0) { targetX = -Math.sin(angle) * mobSpeed * 0.05; targetZ = -Math.cos(angle) * mobSpeed * 0.05; mob.isMoving = true; mob.isAttacking = false; } 
+                    else { mob.isMoving = false; }
                     
-                    if (minD <= 16.0 && mob.attackTimer <= 0 && los) { 
+                    if (minD <= 20.0 && mob.attackTimer <= 0 && los) { 
                         mob.attackTimer = mob.weapon === 'gun' ? 1.5 : 3.0; mob.isAttacking = true; 
                         io.in(roomId).emit('mobShoot', { type: mob.weapon, from: { x: mob.x, y: mob.y + 1.2, z: mob.z }, to: { x: closestPlayer.x, y: closestPlayer.y + 1.5, z: closestPlayer.z } }); 
                     } else mob.isAttacking = false;
                 }
             } else if (mob.isGrounded) { 
-                // Wander slowly
                 if(Math.random() < 0.05) mob.ry += (Math.random() - 0.5) * Math.PI;
-                if(Math.random() < 0.2) { mob.x += Math.sin(mob.ry) * 0.05; mob.z += Math.cos(mob.ry) * 0.05; mob.isMoving = true; } else mob.isMoving = false;
+                if(Math.random() < 0.2) { targetX = Math.sin(mob.ry) * mobSpeed * 0.02; targetZ = Math.cos(mob.ry) * mobSpeed * 0.02; mob.isMoving = true; } else mob.isMoving = false;
                 mob.isAttacking = false; 
             }
 
-            if (minD > 45) { delete room.mobs[mobId]; io.in(roomId).emit('mobKilled', { mobId: mobId, killerName: 'Despawn', mobType: 'SYSTEM' }); }
+            // APPLY HORIZONTAL COLLISION (AABB)
+            mob.x += targetX;
+            if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
+                mob.x -= targetX; // Revert X
+                if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } // Jump over obstacle
+            }
+            mob.z += targetZ;
+            if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
+                mob.z -= targetZ; // Revert Z
+                if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } // Jump over obstacle
+            }
+
+            // APPLY VERTICAL GRAVITY (AABB)
+            mob.vy -= 25.0 * 0.05; 
+            let nextY = mob.y + (mob.vy * 0.05);
+            if (checkCollisionServer(mob.x, nextY, mob.z, room.seed, room.blocks)) {
+                if (mob.vy < 0) {
+                    mob.y = Math.floor(nextY) + 1.0; // Snap exactly to floor
+                    mob.vy = 0; mob.isGrounded = true;
+                } else {
+                    mob.y = Math.floor(nextY + 1.8) - 1.8; // Bonk head on ceiling
+                    mob.vy = 0; mob.isGrounded = false;
+                }
+            } else {
+                mob.y = nextY;
+                mob.isGrounded = false;
+            }
+
+            // ✨ SILENT DESPAWN (Fixes Chat Spam)
+            if (minD > 45 || mob.y < -30) { delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); }
         }
         io.in(roomId).emit('server_tick', { players: room.players, mobs: room.mobs });
     }
