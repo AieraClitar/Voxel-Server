@@ -18,23 +18,40 @@ class SimpleNoise {
     }
 }
 
-// ✨ PERFECT TERRAIN TRACKING MATH
-function getSurfaceY(x, z, seed) {
-    const noise = new SimpleNoise(seed); const roughNoise = new SimpleNoise(seed + 1337);
-    let elevation = (noise.getNoise(x * 0.015, z * 0.015) + 1) * 8;
-    return Math.floor(elevation + roughNoise.getNoise(x * 0.06, z * 0.06) * 3) + 2;
+// ✨ SERVER RAYCASTER: Checks for walls & trees between AI and Player
+function getBlockAt(x, y, z, seed, customBlocks) {
+    const key = `${Math.round(x)},${Math.round(y)},${Math.round(z)}`;
+    if (customBlocks[key]) return customBlocks[key];
+    
+    const noise = new SimpleNoise(seed); const rough = new SimpleNoise(seed + 1337); const trees = new SimpleNoise(seed + 888);
+    let elevation = Math.floor((noise.getNoise(x * 0.015, z * 0.015) + 1) * 8 + rough.getNoise(x * 0.06, z * 0.06) * 3) + 2;
+    
+    if (y <= elevation) return 'stone';
+    if (y > elevation && y <= elevation + 5 && trees.getNoise(x * 0.02, z * 0.02) > 0.1 && Math.abs(trees.random(x, z)) < 0.03) return 'wood'; // Tree trunk approximation
+    return 'air';
+}
+
+function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
+    let dist = Math.sqrt(Math.pow(x2-x1, 2) + Math.pow(y2-y1, 2) + Math.pow(z2-z1, 2));
+    let dx = (x2-x1)/dist; let dy = (y2-y1)/dist; let dz = (z2-z1)/dist;
+    for(let i=1; i<dist; i+=1) {
+        if (getBlockAt(x1 + dx*i, y1 + dy*i, z1 + dz*i, seed, customBlocks) !== 'air') return false;
+    }
+    return true;
+}
+
+function getTrueSurfaceY(x, z, seed, customBlocks) {
+    for(let y = 60; y >= -10; y--) {
+        if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y;
+    }
+    return 2;
 }
 
 const sessions = {}; 
 let globalIdCounter = 0;
 
 io.on('connection', (socket) => {
-    console.log('Player connected:', socket.id);
-    
-    const broadcastLobby = () => {
-        const activeWorlds = Object.keys(sessions).map(id => ({ id: id, hostName: sessions[id].hostName, playerCount: Object.keys(sessions[id].players).length }));
-        io.emit('lobbyUpdate', activeWorlds);
-    };
+    const broadcastLobby = () => { io.emit('lobbyUpdate', Object.keys(sessions).map(id => ({ id: id, hostName: sessions[id].hostName, playerCount: Object.keys(sessions[id].players).length }))); };
     broadcastLobby();
 
     socket.on('createGame', (playerName) => {
@@ -52,10 +69,7 @@ io.on('connection', (socket) => {
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
 
-    socket.on('move', (data) => {
-        if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); }
-    });
-
+    socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
     socket.on('requestBlockBreak', (data) => {
         const room = sessions[socket.roomId]; if (!room) return; const key = `${data.x},${data.y},${data.z}`;
         if (room.blocks[key] === 'air') return; 
@@ -63,28 +77,23 @@ io.on('connection', (socket) => {
         const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: data.type };
         room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
     });
-
     socket.on('requestBlockPlace', (data) => {
         const room = sessions[socket.roomId]; if (!room) return; const key = `${data.x},${data.y},${data.z}`;
         room.blocks[key] = data.type; socket.broadcast.to(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type });
     });
-
     socket.on('requestDropItem', (data) => {
         const room = sessions[socket.roomId]; if (!room) return;
         const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data };
         room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
     });
-
     socket.on('requestPickup', (dropId) => {
         const room = sessions[socket.roomId];
         if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); }
     });
-
     socket.on('requestPlayerDamage', (data) => {
         const room = sessions[socket.roomId];
         if (room && room.players[socket.id]) { room.players[socket.id].health -= data.dmg; io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: data.dmg, source: data.source }); }
     });
-
     socket.on('requestMobAttack', (data) => {
         const room = sessions[socket.roomId];
         if (room && room.mobs[data.id]) {
@@ -92,7 +101,6 @@ io.on('connection', (socket) => {
             if (room.mobs[data.id].health <= 0) { const mobType = room.mobs[data.id].type.toUpperCase(); delete room.mobs[data.id]; io.in(socket.roomId).emit('mobKilled', { mobId: data.id, killerName: room.players[socket.id].name, mobType: mobType }); }
         }
     });
-
     socket.on('playerRespawn', () => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) sessions[socket.roomId].players[socket.id].health = 100; });
     socket.on('disconnect', () => {
         if(socket.roomId && sessions[socket.roomId]) {
@@ -103,26 +111,31 @@ io.on('connection', (socket) => {
     });
 });
 
+// ✨ 20 TPS SERVER AI LOOP
 setInterval(() => {
     for (let roomId in sessions) {
         const room = sessions[roomId]; const playerIds = Object.keys(room.players); if (playerIds.length === 0) continue;
-        const dayTime = ((Date.now() - room.startTime) / 1000 / 240.0) % 1; const sunArc = Math.sin(dayTime * Math.PI * 2); const isDay = sunArc > 0.1;
+        const dayTime = ((Date.now() - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
-        if (Object.keys(room.mobs).length < 10 && Math.random() < 0.05) {
+        // SPAWNING
+        if (Object.keys(room.mobs).length < 12 && Math.random() < 0.05) {
             const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
-            const angle = Math.random() * Math.PI * 2; 
-            const dist = 25 + Math.random() * 15; // ✨ SPAWN KILL FIX: Spawns minimum 25 blocks away!
+            const angle = Math.random() * Math.PI * 2; const dist = 25 + Math.random() * 15; 
             const mx = targetPlayer.x + Math.cos(angle) * dist; const mz = targetPlayer.z + Math.sin(angle) * dist;
-            let my = getSurfaceY(mx, mz, room.seed);
+            let my = getTrueSurfaceY(mx, mz, room.seed, room.blocks);
 
-            const id = 'mob_' + globalIdCounter++; const isZombie = Math.random() > 0.5; const faceVar = Math.random();
-            const faceType = isZombie ? (faceVar < 0.3 ? 'zombie_face_var1' : faceVar < 0.6 ? 'zombie_face_var2' : 'zombie_face') : (faceVar < 0.5 ? 'archer_face_var1' : 'archer_face');
-            
-            // ✨ Y-HEIGHT FIX: mob.y = Surface + 1.0 (prevents sinking/floating!)
-            room.mobs[id] = { id: id, type: isZombie ? 'zombie' : 'archer', weapon: isZombie ? 'wooden_sword' : (Math.random() > 0.5 ? 'bow' : 'crossbow'), face: faceType, x: mx, y: my + 1.0, z: mz, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, attackTimer: 0, burnTimer: 0, shadeTarget: null };
-            io.in(roomId).emit('mobSpawned', room.mobs[id]);
+            if (getBlockAt(mx, my+1, mz, room.seed, room.blocks) === 'air') { // Validate Spawn
+                const id = 'mob_' + globalIdCounter++; const isZombie = Math.random() > 0.5; const faceVar = Math.random();
+                const faceType = isZombie ? (faceVar < 0.3 ? 'zombie_face_var1' : faceVar < 0.6 ? 'zombie_face_var2' : 'zombie_face') : (faceVar < 0.5 ? 'archer_face_var1' : 'archer_face');
+                room.mobs[id] = { 
+                    id: id, type: isZombie ? 'zombie' : 'archer', weapon: isZombie ? 'wooden_sword' : (Math.random() > 0.5 ? 'bow' : 'crossbow'), face: faceType, 
+                    x: mx, y: my + 1.0, z: mz, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, state: 'idle' 
+                };
+                io.in(roomId).emit('mobSpawned', room.mobs[id]);
+            }
         }
 
+        // INTELLIGENCE & PATHFINDING
         for (let mobId in room.mobs) {
             let mob = room.mobs[mobId]; let closestPlayer = null; let minD = 9999;
             for (let pid in room.players) {
@@ -132,27 +145,56 @@ setInterval(() => {
             }
 
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
-            let burning = false;
+            mob.isBurning = false;
+
+            // SUNBURN LOGIC
+            let hasRoof = false;
+            for(let ty=mob.y; ty < mob.y+30; ty++) { if(getBlockAt(mob.x, ty, mob.z, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } }
             
-            // Mobs pathfinding removed for brevity in logs. They act exactly as before.
-            if (closestPlayer && minD < 40) {
-                const angle = Math.atan2(closestPlayer.x - mob.x, closestPlayer.z - mob.z); mob.ry = angle;
-                if (mob.type === 'zombie') {
-                    if (minD > 1.8) { mob.x += Math.sin(angle) * 0.15; mob.z += Math.cos(angle) * 0.15; mob.isMoving = true; mob.isAttacking = false; } 
-                    else {
-                        mob.isMoving = false;
-                        if (mob.attackTimer <= 0) { mob.attackTimer = 1.5; mob.isAttacking = true; room.players[closestPlayer.id].health -= 15; io.in(roomId).emit('playerDamaged', { id: closestPlayer.id, dmg: 15, source: 'Zombie' }); } else mob.isAttacking = false;
-                    }
-                } else if (mob.type === 'archer') {
-                    if (minD > 15.0) { mob.x += Math.sin(angle) * 0.15; mob.z += Math.cos(angle) * 0.15; mob.isMoving = true; mob.isAttacking = false; } 
-                    else if (minD < 8.0) { mob.x -= Math.sin(angle) * 0.15; mob.z -= Math.cos(angle) * 0.15; mob.isMoving = true; mob.isAttacking = false; } else { mob.isMoving = false; }
-                    if (minD <= 25.0 && mob.attackTimer <= 0) { mob.attackTimer = 3.0; mob.isAttacking = true; io.in(roomId).emit('mobShoot', { type: mob.type, from: { x: mob.x, y: mob.y, z: mob.z }, to: { x: closestPlayer.x, y: closestPlayer.y + 1.5, z: closestPlayer.z } }); } else mob.isAttacking = false;
+            if (mob.type === 'zombie' && isDay && !hasRoof) {
+                mob.isBurning = true; 
+                if (Math.random() < 0.1) {
+                    mob.health -= 5; io.in(roomId).emit('mobDamaged', { id: mob.id, kbDir: {x:0, y:0, z:0} });
+                    if (mob.health <= 0) { io.in(roomId).emit('mobKilled', { mobId: mob.id, killerName: 'The Sun', mobType: 'ZOMBIE' }); delete room.mobs[mobId]; continue; }
                 }
+            }
+
+            // AVOIDANCE & CHASE
+            let los = closestPlayer ? hasLineOfSight(mob.x, mob.y+1, mob.z, closestPlayer.x, closestPlayer.y+1, closestPlayer.z, room.seed, room.blocks) : false;
+
+            if (mob.isBurning && !closestPlayer) {
+                // Seek shade
+                mob.ry += 0.5; mob.x += Math.sin(mob.ry) * 0.2; mob.z += Math.cos(mob.ry) * 0.2; mob.isMoving = true;
+            } else if (closestPlayer && minD < 30 && los) {
+                // Chase
+                const angle = Math.atan2(closestPlayer.x - mob.x, closestPlayer.z - mob.z); mob.ry = angle;
                 
-                // ✨ EXACT TERRAIN TRACKING
-                let elevation = getSurfaceY(mob.x, mob.z, room.seed); 
-                mob.y = elevation + 1.0; 
-            } else { mob.isMoving = false; mob.isAttacking = false; }
+                // Obstacle Avoidance (Steer)
+                let frontBlock = getBlockAt(mob.x + Math.sin(angle), mob.y, mob.z + Math.cos(angle), room.seed, room.blocks);
+                if (frontBlock !== 'air') { mob.x += Math.sin(angle + Math.PI/4) * 0.15; mob.z += Math.cos(angle + Math.PI/4) * 0.15; } // Step sideways
+                else {
+                    if (mob.type === 'zombie') {
+                        if (minD > 1.8) { mob.x += Math.sin(angle) * 0.18; mob.z += Math.cos(angle) * 0.18; mob.isMoving = true; mob.isAttacking = false; } 
+                        else {
+                            mob.isMoving = false;
+                            if (mob.attackTimer <= 0) { mob.attackTimer = 1.5; mob.isAttacking = true; room.players[closestPlayer.id].health -= 15; io.in(roomId).emit('playerDamaged', { id: closestPlayer.id, dmg: 15, source: 'Zombie' }); } else mob.isAttacking = false;
+                        }
+                    } else if (mob.type === 'archer') {
+                        if (minD > 15.0) { mob.x += Math.sin(angle) * 0.15; mob.z += Math.cos(angle) * 0.15; mob.isMoving = true; mob.isAttacking = false; } 
+                        else if (minD < 8.0) { mob.x -= Math.sin(angle) * 0.15; mob.z -= Math.cos(angle) * 0.15; mob.isMoving = true; mob.isAttacking = false; } else { mob.isMoving = false; }
+                        if (minD <= 25.0 && mob.attackTimer <= 0) { mob.attackTimer = 3.0; mob.isAttacking = true; io.in(roomId).emit('mobShoot', { type: mob.type, from: { x: mob.x, y: mob.y + 1, z: mob.z }, to: { x: closestPlayer.x, y: closestPlayer.y + 1.5, z: closestPlayer.z } }); } else mob.isAttacking = false;
+                    }
+                }
+            } else { 
+                // Idle / Wander
+                if(Math.random() < 0.02) mob.ry = Math.random() * Math.PI * 2;
+                if(Math.random() < 0.5) { mob.x += Math.sin(mob.ry) * 0.05; mob.z += Math.cos(mob.ry) * 0.05; mob.isMoving = true; } else mob.isMoving = false;
+                mob.isAttacking = false; 
+            }
+            
+            // Ground Gravity Tracking
+            let elevation = getTrueSurfaceY(mob.x, mob.z, room.seed, room.blocks); 
+            mob.y = elevation + 1.0; 
         }
         io.in(roomId).emit('server_tick', { players: room.players, mobs: room.mobs });
     }
