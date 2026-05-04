@@ -78,7 +78,7 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
         for (let by = pMinY; by <= pMaxY; by++) {
             for (let bz = pMinZ; bz <= pMaxZ; bz++) {
                 const type = getBlockAt(bx, by, bz, seed, customBlocks);
-                if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
+                if (type !== 'air' && type !== 'water' && type !== 'torch') {
                     if (feetY < by + 0.5 && headY > by - 0.5) return true;
                 }
             }
@@ -94,24 +94,30 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
     return true;
 }
 
-// ✨ THE RIGOROUS SPAWNER FIX: Scans from the sky downwards to guarantee it finds the true surface.
+// ✨ THE FIX: We collect ALL valid floors (cave floors, plains, mountains) and pick one randomly so spawns don't get aborted by tree leaves.
 function getValidSpawnY(x, z, seed, customBlocks) {
-    for (let y = 60; y >= -30; y--) {
+    let validFloors = [];
+    for (let y = -28; y <= 60; y++) {
         const type = getBlockAt(x, y, z, seed, customBlocks);
         
-        // Find a solid block to stand on (excluding air, water, and leaves)
+        // Find a solid block to stand on
         if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
             
-            // Validate the two blocks above it are empty air space for the mob to fit
+            // Validate the two blocks above it are empty air space
             const blockAbove1 = getBlockAt(x, y + 1, z, seed, customBlocks);
             const blockAbove2 = getBlockAt(x, y + 2, z, seed, customBlocks);
             
-            if (blockAbove1 === 'air' && blockAbove2 === 'air') {
-                return y; // Perfect spawn location found!
+            if ((blockAbove1 === 'air' || blockAbove1 === 'torch') && (blockAbove2 === 'air' || blockAbove2 === 'torch')) {
+                validFloors.push(y);
             }
         }
     }
-    return null; // Reached the void without finding a valid space
+    
+    if (validFloors.length > 0) {
+        // Pick a random valid floor in this X/Z column (allows cave spawning)
+        return validFloors[Math.floor(Math.random() * validFloors.length)];
+    }
+    return null;
 }
 
 const sessions = {}; let globalIdCounter = 0;
@@ -169,7 +175,6 @@ setInterval(() => {
                 const mx = targetPlayer.x + Math.cos(angle) * dist; 
                 const mz = targetPlayer.z + Math.sin(angle) * dist;
                 
-                // Using the rigorously tested spawner
                 const floorY = getValidSpawnY(mx, mz, room.seed, room.blocks);
 
                 if (floorY !== null) { 
@@ -182,7 +187,6 @@ setInterval(() => {
 
                     room.mobs[id] = { 
                         id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
-                        // ✨ They now spawn perfectly flat on the ground
                         x: mx, y: floorY + 0.5, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false, roamTimer: 0
                     };
                     room.lastSpawnTime = now; io.in(roomId).emit('mobSpawned', room.mobs[id]);
@@ -275,8 +279,7 @@ setInterval(() => {
                 mob.y += yStepAmt;
                 if (mob.vy < 0) { 
                     if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        // ✨ THE PHYSICS FIX: Perfectly snaps feet to the block surface without bouncing.
-                        mob.y = Math.floor(mob.y + 0.5) + 0.5; 
+                        mob.y = Math.floor(mob.y - 0.5) + 0.5; 
                         mob.vy = 0; mob.isGrounded = true; 
                         break; 
                     } else { 
