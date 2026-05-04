@@ -6,20 +6,23 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
+// ✨ THE FIX: Exact mathematical match to your client's Noise.js
 class SimpleNoise {
     constructor(seed = 1) { this.seed = seed; }
-    random(x, z) { let n = Math.floor(x) * 331 + Math.floor(z) * 337 + this.seed; n = (n << 13) ^ n; return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0); }
+    random(x, z) { 
+        const sin = Math.sin(Math.floor(x) * 12.9898 + Math.floor(z) * 78.233 + this.seed) * 43758.5453;
+        return sin - Math.floor(sin);
+    }
     getNoise(x, z) {
         const intX = Math.floor(x); const intZ = Math.floor(z); const fractX = x - intX; const fractZ = z - intZ;
         const v1 = this.random(intX, intZ); const v2 = this.random(intX + 1, intZ); const v3 = this.random(intX, intZ + 1); const v4 = this.random(intX + 1, intZ + 1);
-        const i1 = v1 * (1 - fractX) + v2 * fractX; const i2 = v3 * (1 - fractX) + v4 * fractX;
-        return i1 * (1 - fractZ) + i2 * fractZ;
+        const fX = (1 - Math.cos(fractX * Math.PI)) * 0.5; const fZ = (1 - Math.cos(fractZ * Math.PI)) * 0.5;
+        const i1 = v1 * (1 - fX) + v2 * fX; const i2 = v3 * (1 - fX) + v4 * fX;
+        return (i1 * (1 - fZ) + i2 * fZ) * 2.0 - 1.0;
     }
 }
 
-// ✨ THE FIX: Match the Client's World.js exactly.
-const Y_OFFSET = 30; 
-
+// ✨ THE FIX: Removed the Y_OFFSET entirely so the server Y maps exactly to the client Y
 function getBlockAt(x, y, z, seed, customBlocks) {
     const bx = Math.floor(x); const by = Math.floor(y); const bz = Math.floor(z);
     const key = `${bx},${by},${bz}`;
@@ -28,13 +31,11 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     const noise = new SimpleNoise(seed); const rough = new SimpleNoise(seed + 1337); const trees = new SimpleNoise(seed + 888);
     const tempMap = new SimpleNoise(seed + 555);
     
-    // Server calculates noise, then adds the offset to find the real 3D rendering height.
-    let rawElevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
-    let trueElevation = rawElevation + Y_OFFSET; 
+    let elevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
     let isTundra = tempMap.getNoise(bx * 0.005, bz * 0.005) < -0.25;
     
-    if (by <= trueElevation) return 'stone';
-    if (!isTundra && by > trueElevation && by <= trueElevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
+    if (by <= elevation) return 'stone';
+    if (!isTundra && by > elevation && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
     return 'air';
 }
 
@@ -62,9 +63,8 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
 }
 
 function getTrueSurfaceY(x, z, seed, customBlocks) {
-    // Search downward from Y=80 (Above offset)
-    for(let y = 80; y >= 0; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
-    return Y_OFFSET; 
+    for(let y = 60; y >= -30; y--) { if(getBlockAt(x, y, z, seed, customBlocks) !== 'air') return y; }
+    return -28; 
 }
 
 const sessions = {}; let globalIdCounter = 0;
@@ -83,7 +83,7 @@ io.on('connection', (socket) => {
 
     function joinRoom(socket, roomId, playerName) {
         socket.join(roomId); socket.roomId = roomId; const room = sessions[roomId];
-        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: Y_OFFSET + 10, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
+        room.players[socket.id] = { name: playerName || "Guest", x: 16, y: 10, z: 16, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: 100 };
         socket.emit('world_snapshot', { seed: room.seed, players: room.players, blocks: room.blocks, drops: room.drops, mobs: room.mobs, ageInSeconds: (Date.now() - room.startTime) / 1000, isHost: socket.id === room.hostId });
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
@@ -114,10 +114,12 @@ setInterval(() => {
         const dayTime = ((now - room.startTime) / 1000 / 240.0) % 1; const isDay = Math.sin(dayTime * Math.PI * 2) > 0.1;
 
         if (Object.keys(room.mobs).length < 15 && (now - room.lastSpawnTime > 2500)) {
-            const spawnChance = isDay ? 0.01 : 0.1; 
+            const spawnChance = isDay ? 0.05 : 0.2; 
             if (Math.random() < spawnChance) {
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
-                const angle = Math.random() * Math.PI * 2; const dist = 25 + Math.random() * 15; 
+                const angle = Math.random() * Math.PI * 2; 
+                // ✨ FIX: Spawn distance is closer (15 to 25 blocks) so you can actually see them appear
+                const dist = 15 + Math.random() * 10; 
                 const mx = targetPlayer.x + Math.cos(angle) * dist; const mz = targetPlayer.z + Math.sin(angle) * dist;
                 let my = getTrueSurfaceY(mx, mz, room.seed, room.blocks);
 
@@ -198,7 +200,6 @@ setInterval(() => {
                 mob.isAttacking = false; 
             }
 
-            // HORIZONTAL (AABB)
             mob.x += targetX;
             if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
                 mob.x -= targetX; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
@@ -208,7 +209,6 @@ setInterval(() => {
                 mob.z -= targetZ; if (mob.isGrounded) { mob.vy = 8.5; mob.isGrounded = false; } 
             }
 
-            // PURE GRAVITY: Mobs fall into pits naturally!
             mob.vy -= 25.0 * 0.05; 
             let nextY = mob.y + (mob.vy * 0.05);
             
@@ -225,8 +225,8 @@ setInterval(() => {
                 mob.isGrounded = false;
             }
 
-            // ✨ SILENT DESPAWN: Removes from screen without Chat Spam!
-            if (minD > 45 || mob.y < -35) { 
+            // ✨ FIX: Increased despawn distance so they don't vanish immediately
+            if (minD > 60 || mob.y < -35) { 
                 delete room.mobs[mobId]; 
                 io.in(roomId).emit('mobDespawned', mobId); 
             }
