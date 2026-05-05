@@ -243,18 +243,15 @@ io.on('connection', (socket) => {
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
 
-    // ✨ THE FIX: Decentralized Save & Exit. Never deletes the active world if people are still playing.
     socket.on('saveAndExit', (data) => {
         const room = sessions[socket.roomId];
         if (!room) return;
 
-        // Save this specific player's personal data to active memory
         room.savedPlayers[data.playerName] = {
             inventory: data.inventory, x: data.x, y: data.y, z: data.z, health: data.health
         };
 
         if (room.hostId === socket.id) {
-            // Take a proactive snapshot of the world when the host leaves
             const wName = room.worldName;
             if (!savedWorlds[wName]) savedWorlds[wName] = { seed: room.seed, blocks: {}, players: {} };
             savedWorlds[wName].passcode = room.passcode;
@@ -264,7 +261,10 @@ io.on('connection', (socket) => {
             saveDatabase();
         }
 
-        // Just disconnect gracefully. The 'disconnect' event will clean up the room if it's empty!
+        // ✨ THE FIX: We must broadcast the player disconnected signal explicitly BEFORE disconnecting the socket.
+        socket.to(socket.roomId).emit('playerDisconnected', socket.id);
+        delete room.players[socket.id];
+
         socket.emit('hostLeft', 'Progress saved! You have safely exited the world.');
         socket.disconnect(); 
     });
@@ -304,12 +304,10 @@ io.on('connection', (socket) => {
 
     socket.on('playerRespawn', () => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) sessions[socket.roomId].players[socket.id].health = 100; });
     
-    // ✨ THE FIX: Auto-Saves and checks for "Last Man Standing" on any disconnect
     socket.on('disconnect', () => { 
         if(socket.roomId && sessions[socket.roomId]) { 
             const room = sessions[socket.roomId];
             
-            // Auto-save positional data if they didn't click Save & Exit (e.g. closed tab)
             if (room.players[socket.id]) {
                 const pName = room.players[socket.id].name;
                 if (!room.savedPlayers[pName]) room.savedPlayers[pName] = { inventory: null };
@@ -322,7 +320,6 @@ io.on('connection', (socket) => {
             delete room.players[socket.id]; 
             socket.to(socket.roomId).emit('playerDisconnected', socket.id); 
             
-            // If the room is now completely empty, archive it and shut it down!
             if(Object.keys(room.players).length === 0) { 
                 const wName = room.worldName;
                 if (!savedWorlds[wName]) savedWorlds[wName] = { seed: room.seed, blocks: {}, players: {} };
