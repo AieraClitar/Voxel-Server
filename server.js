@@ -118,17 +118,15 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
 function getValidSpawnY(x, z, seed, customBlocks) {
     let highestFloor = null;
     
-    // Scan from bedrock to sky to explicitly find the surface floor
+    // SURFACE FIX: Scan from bedrock to sky to strictly find the highest surface
     for (let y = -28; y <= 60; y++) {
         const type = getBlockAt(x, y, z, seed, customBlocks);
         if (type !== 'air' && type !== 'water' && type !== 'lava' && type !== 'torch' && type !== 'leaves' && type !== 'wood') {
             const blockAbove1 = getBlockAt(x, y + 1, z, seed, customBlocks);
             const blockAbove2 = getBlockAt(x, y + 2, z, seed, customBlocks);
             
-            // Validate there's space to spawn
             if ((blockAbove1 === 'air' || blockAbove1 === 'torch' || blockAbove1 === 'leaves') && 
                 (blockAbove2 === 'air' || blockAbove2 === 'torch' || blockAbove2 === 'leaves')) {
-                // Continuously overwrite so we only ever target the highest available surface
                 highestFloor = y; 
             }
         }
@@ -280,8 +278,6 @@ io.on('connection', (socket) => {
         if (!room) return; 
         
         const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
-        
-        // ANTI-DUPLICATION FIX: Stop processing if another player already broke the block
         if (room.blocks[key] === 'air') return;
         
         const actualType = room.blocks[key] || data.type; 
@@ -294,6 +290,17 @@ io.on('connection', (socket) => {
         const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; 
         room.drops[dropId] = dropData; 
         io.in(socket.roomId).emit('item_spawned', dropData); 
+
+        // TORCH ATTACHMENT DESYNC FIX
+        const topKey = `${Math.floor(data.x)},${Math.floor(data.y + 1)},${Math.floor(data.z)}`;
+        if (room.blocks[topKey] === 'torch') {
+            room.blocks[topKey] = 'air';
+            io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y + 1, z: data.z, type: 'torch' });
+            const torchDropId = 'drop_' + globalIdCounter++; 
+            const torchDropData = { id: torchDropId, x: data.x, y: data.y + 1, z: data.z, type: 'torch' }; 
+            room.drops[torchDropId] = torchDropData; 
+            io.in(socket.roomId).emit('item_spawned', torchDropData); 
+        }
     });
 
     socket.on('requestBlockPlace', (data) => { 
@@ -301,8 +308,6 @@ io.on('connection', (socket) => {
         if (!room) return; 
         
         const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
-        
-        // ANTI-DUPLICATION FIX: Make sure the target location is actually empty
         const currentType = room.blocks[key] || getBlockAt(data.x, data.y, data.z, room.seed, room.blocks);
         if (currentType !== 'air' && currentType !== 'water' && currentType !== 'lava') return;
 
@@ -314,7 +319,6 @@ io.on('connection', (socket) => {
     
     socket.on('requestPickup', (dropId) => { 
         const room = sessions[socket.roomId]; 
-        // Synchronous drop deletion guarantees no duplicate pickups
         if(room && room.drops[dropId]) { 
             const itemType = room.drops[dropId].type; 
             delete room.drops[dropId]; 
