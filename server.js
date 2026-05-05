@@ -8,7 +8,6 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-// ✨ THE FIX: We use Node.js File System to physically save the world to the hard drive so it survives server restarts.
 const DB_FILE = path.join(__dirname, 'saved_worlds.json');
 let savedWorlds = {};
 
@@ -149,14 +148,32 @@ io.on('connection', (socket) => {
     });
 
     socket.on('createGame', (data) => {
-        const roomId = socket.id; 
         const wName = data.worldName || "New World";
         const passcode = data.passcode;
-        
+        let hostName = data.playerName || "Guest";
+
+        let activeRoomId = null;
+        for (let rid in sessions) {
+            if (sessions[rid].worldName === wName) {
+                activeRoomId = rid;
+                break;
+            }
+        }
+
+        if (activeRoomId) {
+            if (sessions[activeRoomId].passcode !== passcode) {
+                socket.emit('hostError', 'Incorrect Passcode for this active world!');
+                return;
+            }
+            sessions[activeRoomId].hostId = socket.id; 
+            joinRoom(socket, activeRoomId, hostName);
+            broadcastLobby();
+            return;
+        }
+
         let seed = Math.floor(Math.random() * 10000);
         let blocks = {};
         let loadedPlayers = {};
-        let hostName = data.playerName || "Guest";
 
         if (savedWorlds[wName]) {
             if (savedWorlds[wName].passcode !== passcode) {
@@ -171,6 +188,7 @@ io.on('connection', (socket) => {
             saveDatabase();
         }
 
+        const roomId = socket.id; 
         sessions[roomId] = { 
             seed: seed, 
             hostId: socket.id, 
@@ -185,9 +203,18 @@ io.on('connection', (socket) => {
         broadcastLobby(); 
     });
 
+    // ✨ THE ANTI-THEFT FIX: Block joiners from using the Host's name completely.
     socket.on('joinGame', (data) => { 
         if(sessions[data.roomId]) { 
-            joinRoom(socket, data.roomId, data.playerName); 
+            let pName = data.playerName || "Guest";
+            
+            // Strict check: if a lobby joiner types the host's name, flat out deny entry.
+            if (pName.toLowerCase() === sessions[data.roomId].hostName.toLowerCase()) {
+                socket.emit('joinError', 'Access Denied: That name belongs to the Host. If you are the Host, please use the "Host World" menu and enter your Passcode to reclaim your world.');
+                return;
+            }
+
+            joinRoom(socket, data.roomId, pName); 
             broadcastLobby(); 
         } else {
             socket.emit('joinError', 'This world no longer exists or the host has left.');
@@ -209,7 +236,7 @@ io.on('connection', (socket) => {
             hasSavedData = true;
         }
 
-        room.players[socket.id] = { name: playerName || "Guest", x: px, y: py, z: pz, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: pHealth };
+        room.players[socket.id] = { name: playerName, x: px, y: py, z: pz, ry: 0, rx: 0, heldItem: null, isAttacking: false, health: pHealth };
         
         socket.emit('world_snapshot', { seed: room.seed, players: room.players, blocks: room.blocks, drops: room.drops, mobs: room.mobs, ageInSeconds: (Date.now() - room.startTime) / 1000, isHost: socket.id === room.hostId });
         
@@ -220,7 +247,6 @@ io.on('connection', (socket) => {
         socket.to(roomId).emit('newPlayer', { id: socket.id, player: room.players[socket.id] });
     }
 
-    // ✨ THE FIX: We differentiate between the Host saving the world vs a Joiner saving their personal account.
     socket.on('saveAndExit', (data) => {
         const room = sessions[socket.roomId];
         if (!room) return;
@@ -239,7 +265,6 @@ io.on('connection', (socket) => {
             
             savedWorlds[wName].players = room.savedPlayers; 
 
-            // Kick everyone out since the host shut down the server
             socket.to(socket.roomId).emit('hostLeft', 'The Host has saved and closed the world.');
             socket.emit('hostLeft', 'World Saved Successfully.'); 
             
@@ -247,7 +272,6 @@ io.on('connection', (socket) => {
             saveDatabase();
             broadcastLobby();
         } else {
-            // Joiner is just leaving. Save their data to the active room.
             room.savedPlayers[data.playerName] = {
                 inventory: data.inventory, x: data.x, y: data.y, z: data.z, health: data.health
             };
@@ -293,18 +317,28 @@ io.on('connection', (socket) => {
     
     socket.on('disconnect', () => { 
         if(socket.roomId && sessions[socket.roomId]) { 
-            delete sessions[socket.roomId].players[socket.id]; 
+            const room = sessions[socket.roomId];
+            
+            if (room.players[socket.id]) {
+                const pName = room.players[socket.id].name;
+                if (!room.savedPlayers[pName]) room.savedPlayers[pName] = { inventory: null };
+                room.savedPlayers[pName].x = room.players[socket.id].x;
+                room.savedPlayers[pName].y = room.players[socket.id].y;
+                room.savedPlayers[pName].z = room.players[socket.id].z;
+                room.savedPlayers[pName].health = room.players[socket.id].health;
+            }
+
+            delete room.players[socket.id]; 
             socket.to(socket.roomId).emit('playerDisconnected', socket.id); 
             
-            if(sessions[socket.roomId].hostId === socket.id) { 
-                const wName = sessions[socket.roomId].worldName;
-                if (!savedWorlds[wName]) savedWorlds[wName] = { seed: sessions[socket.roomId].seed, blocks: {}, players: {} };
-                savedWorlds[wName].passcode = sessions[socket.roomId].passcode;
-                savedWorlds[wName].hostName = sessions[socket.roomId].hostName;
-                savedWorlds[wName].blocks = JSON.parse(JSON.stringify(sessions[socket.roomId].blocks));
-                savedWorlds[wName].players = sessions[socket.roomId].savedPlayers; 
+            if(Object.keys(room.players).length === 0) { 
+                const wName = room.worldName;
+                if (!savedWorlds[wName]) savedWorlds[wName] = { seed: room.seed, blocks: {}, players: {} };
+                savedWorlds[wName].passcode = room.passcode;
+                savedWorlds[wName].hostName = room.hostName;
+                savedWorlds[wName].blocks = JSON.parse(JSON.stringify(room.blocks));
+                savedWorlds[wName].players = room.savedPlayers; 
 
-                socket.to(socket.roomId).emit('hostLeft', 'The Host disconnected. The world has been closed.'); 
                 delete sessions[socket.roomId]; 
                 saveDatabase();
             } 
