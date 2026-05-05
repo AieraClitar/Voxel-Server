@@ -66,7 +66,10 @@ function getBlockAt(x, y, z, seed, customBlocks) {
         if (Math.abs(n1) < 0.12 && Math.abs(n2) < 0.12) isCave = true;
     }
 
-    if (isCave) return 'air';
+    if (isCave) {
+        if (by < -20 && Math.random() < 0.05) return 'lava';
+        return 'air';
+    }
     
     if (by > elevation) {
         if (by <= 5) return (biome === 'tundra' && by === 5) ? 'ice' : 'water';
@@ -96,7 +99,7 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
         for (let by = pMinY; by <= pMaxY; by++) {
             for (let bz = pMinZ; bz <= pMaxZ; bz++) {
                 const type = getBlockAt(bx, by, bz, seed, customBlocks);
-                if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
+                if (type !== 'air' && type !== 'water' && type !== 'lava' && type !== 'torch' && type !== 'leaves') {
                     if (feetY < by + 0.5 && headY > by - 0.5) return true;
                 }
             }
@@ -113,23 +116,25 @@ function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
 }
 
 function getValidSpawnY(x, z, seed, customBlocks) {
-    let validFloors = [];
+    let highestFloor = null;
+    
+    // Scan from bedrock to sky to explicitly find the surface floor
     for (let y = -28; y <= 60; y++) {
         const type = getBlockAt(x, y, z, seed, customBlocks);
-        if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves' && type !== 'wood') {
+        if (type !== 'air' && type !== 'water' && type !== 'lava' && type !== 'torch' && type !== 'leaves' && type !== 'wood') {
             const blockAbove1 = getBlockAt(x, y + 1, z, seed, customBlocks);
             const blockAbove2 = getBlockAt(x, y + 2, z, seed, customBlocks);
+            
+            // Validate there's space to spawn
             if ((blockAbove1 === 'air' || blockAbove1 === 'torch' || blockAbove1 === 'leaves') && 
                 (blockAbove2 === 'air' || blockAbove2 === 'torch' || blockAbove2 === 'leaves')) {
-                validFloors.push(y);
+                // Continuously overwrite so we only ever target the highest available surface
+                highestFloor = y; 
             }
         }
     }
-    if (validFloors.length > 0) {
-        if (Math.random() > 0.3) return validFloors[validFloors.length - 1]; 
-        return validFloors[Math.floor(Math.random() * validFloors.length)]; 
-    }
-    return null;
+    
+    return highestFloor;
 }
 
 const sessions = {}; 
@@ -261,7 +266,6 @@ io.on('connection', (socket) => {
             saveDatabase();
         }
 
-        // ✨ THE FIX: We must broadcast the player disconnected signal explicitly BEFORE disconnecting the socket.
         socket.to(socket.roomId).emit('playerDisconnected', socket.id);
         delete room.players[socket.id];
 
@@ -270,10 +274,54 @@ io.on('connection', (socket) => {
     });
 
     socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
-    socket.on('requestBlockBreak', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
-    socket.on('requestBlockPlace', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); });
+    
+    socket.on('requestBlockBreak', (data) => { 
+        const room = sessions[socket.roomId]; 
+        if (!room) return; 
+        
+        const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
+        
+        // ANTI-DUPLICATION FIX: Stop processing if another player already broke the block
+        if (room.blocks[key] === 'air') return;
+        
+        const actualType = room.blocks[key] || data.type; 
+        if (actualType === 'air' || actualType === 'water' || actualType === 'lava') return; 
+        
+        room.blocks[key] = 'air'; 
+        io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); 
+        
+        const dropId = 'drop_' + globalIdCounter++; 
+        const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; 
+        room.drops[dropId] = dropData; 
+        io.in(socket.roomId).emit('item_spawned', dropData); 
+    });
+
+    socket.on('requestBlockPlace', (data) => { 
+        const room = sessions[socket.roomId]; 
+        if (!room) return; 
+        
+        const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
+        
+        // ANTI-DUPLICATION FIX: Make sure the target location is actually empty
+        const currentType = room.blocks[key] || getBlockAt(data.x, data.y, data.z, room.seed, room.blocks);
+        if (currentType !== 'air' && currentType !== 'water' && currentType !== 'lava') return;
+
+        room.blocks[key] = data.type; 
+        io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); 
+    });
+
     socket.on('requestDropItem', (data) => { const room = sessions[socket.roomId]; if (!room) return; const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; room.drops[dropId] = room.drops[dropId] || dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
-    socket.on('requestPickup', (dropId) => { const room = sessions[socket.roomId]; if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); } });
+    
+    socket.on('requestPickup', (dropId) => { 
+        const room = sessions[socket.roomId]; 
+        // Synchronous drop deletion guarantees no duplicate pickups
+        if(room && room.drops[dropId]) { 
+            const itemType = room.drops[dropId].type; 
+            delete room.drops[dropId]; 
+            socket.emit('pickupSuccess', itemType); 
+            io.in(socket.roomId).emit('item_removed', dropId); 
+        } 
+    });
     
     socket.on('requestPlayerDamage', (data) => { 
         const room = sessions[socket.roomId]; 
@@ -474,7 +522,7 @@ setInterval(() => {
                 }
             }
 
-            let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water';
+            let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water' || getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'lava';
             if (inWater) { mob.vy = 2.0; } else { mob.vy -= 25.0 * 0.05; }
 
             let yMove = mob.vy * 0.05;
