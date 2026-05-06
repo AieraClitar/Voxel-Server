@@ -110,9 +110,16 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
 }
 
 function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
-    let dist = Math.sqrt(Math.pow(x2-x1, 2) + Math.pow(y2-y1, 2) + Math.pow(z2-z1, 2));
-    let dx = (x2-x1)/dist; let dy = (y2-y1)/dist; let dz = (z2-z1)/dist;
-    for(let i=0.5; i<dist; i+=0.5) { if (getBlockAt(x1 + dx*i, y1 + dy*i, z1 + dz*i, seed, customBlocks) !== 'air') return false; }
+    let dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
+    let dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (dist === 0) return true;
+    let step = Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz));
+    dx /= step; dy /= step; dz /= step;
+    let x = x1, y = y1, z = z1;
+    for (let i = 0; i < step; i++) {
+        if (getBlockAt(x, y, z, seed, customBlocks) !== 'air') return false;
+        x += dx; y += dy; z += dz;
+    }
     return true;
 }
 
@@ -284,12 +291,25 @@ io.on('connection', (socket) => {
         } 
     });
     
+    socket.on('startMining', (data) => {
+        const room = sessions[socket.roomId]; if (!room) return; 
+        const p = room.players[socket.id]; if (!p) return;
+        p.miningPos = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`;
+        p.miningStartTime = Date.now();
+    });
+
     socket.on('requestBlockBreak', (data) => { 
         const room = sessions[socket.roomId]; if (!room) return; 
         const p = room.players[socket.id]; if (!p) return;
         if (Math.pow(p.x - data.x, 2) + Math.pow(p.y - data.y, 2) + Math.pow(p.z - data.z, 2) > 150) return; // Anti-reach
         const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
-        const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; 
+        const actualType = getBlockAt(data.x, data.y, data.z, room.seed, room.blocks); 
+        if (actualType === 'air' || actualType === 'bedrock') return; 
+        
+        const elapsed = Date.now() - (p.miningStartTime || 0);
+        if (p.miningPos !== key || elapsed < 100) return; // Anti-cheat mining time
+        p.miningPos = null;
+
         room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); 
         const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; 
         room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
@@ -299,6 +319,9 @@ io.on('connection', (socket) => {
         const room = sessions[socket.roomId]; if (!room) return; 
         const p = room.players[socket.id]; if (!p) return;
         if (Math.pow(p.x - data.x, 2) + Math.pow(p.y - data.y, 2) + Math.pow(p.z - data.z, 2) > 150) return; // Anti-reach
+        const actualType = getBlockAt(data.x, data.y, data.z, room.seed, room.blocks);
+        if (actualType !== 'air' && actualType !== 'water') return; // Cannot place inside blocks
+
         const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
         room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); 
     });
@@ -309,7 +332,15 @@ io.on('connection', (socket) => {
         const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; 
         room.drops[dropId] = room.drops[dropId] || dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
     });
-    socket.on('requestPickup', (dropId) => { const room = sessions[socket.roomId]; if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); } });
+    socket.on('requestPickup', (dropId) => { 
+        const room = sessions[socket.roomId]; 
+        if(room && room.drops[dropId]) { 
+            const p = room.players[socket.id]; const d = room.drops[dropId];
+            if (!p || Math.pow(p.x - d.x, 2) + Math.pow(p.y - d.y, 2) + Math.pow(p.z - d.z, 2) > 100) return; // Anti-reach
+            const itemType = room.drops[dropId].type; delete room.drops[dropId]; 
+            socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); 
+        } 
+    });
     
     socket.on('requestPlayerDamage', (data) => { 
         const room = sessions[socket.roomId]; 
@@ -388,6 +419,18 @@ setInterval(() => {
         for (let m in room.mobs) {
             if (room.mobs[m].type === 'zombie') currentZombies++;
             else if (room.mobs[m].type === 'archer') currentArchers++;
+        }
+
+        for (let dropId in room.drops) {
+            let d = room.drops[dropId];
+            if (d.vy === undefined) d.vy = 0;
+            if (!d.isGrounded) {
+                d.vy -= 15 * 0.05; d.y += d.vy * 0.05;
+                if (getBlockAt(d.x, d.y - 0.2, d.z, room.seed, room.blocks) !== 'air') {
+                    d.y = Math.floor(d.y - 0.2) + 0.5 + 0.2; d.vy = 0; d.isGrounded = true;
+                }
+                if (d.y < -40) delete room.drops[dropId];
+            }
         }
 
         if (Object.keys(room.mobs).length < 25 && (now - room.lastSpawnTime > 1000)) {
