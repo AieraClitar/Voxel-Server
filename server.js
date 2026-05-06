@@ -21,9 +21,11 @@ try {
 }
 
 function saveDatabase() {
-    fs.writeFile(DB_FILE, JSON.stringify(savedWorlds), (err) => {
-        if (err) console.error("Failed to save database:", err);
-    });
+    try {
+        fs.writeFileSync(DB_FILE, JSON.stringify(savedWorlds));
+    } catch (err) {
+        console.error("Failed to save database:", err);
+    }
 }
 
 class SimpleNoise {
@@ -41,22 +43,16 @@ class SimpleNoise {
     }
 }
 
-const noiseCache = {};
-function getNoiseGenerators(seed) {
-    if (!noiseCache[seed]) {
-        noiseCache[seed] = { noise: new SimpleNoise(seed), rough: new SimpleNoise(seed + 1337), trees: new SimpleNoise(seed + 888), tempMap: new SimpleNoise(seed + 555), humidMap: new SimpleNoise(seed + 999) };
-    }
-    return noiseCache[seed];
-}
-
 function getBlockAt(x, y, z, seed, customBlocks) {
     const bx = Math.floor(x); const by = Math.floor(y); const bz = Math.floor(z);
     const key = `${bx},${by},${bz}`;
     if (customBlocks[key]) return customBlocks[key];
     
-    const gens = getNoiseGenerators(seed);
-    const noise = gens.noise; const rough = gens.rough; const trees = gens.trees;
-    const tempMap = gens.tempMap; const humidMap = gens.humidMap;
+    const noise = new SimpleNoise(seed); 
+    const rough = new SimpleNoise(seed + 1337); 
+    const trees = new SimpleNoise(seed + 888);
+    const tempMap = new SimpleNoise(seed + 555);
+    const humidMap = new SimpleNoise(seed + 999);
     
     let elevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
     let temp = tempMap.getNoise(bx * 0.005, bz * 0.005);
@@ -90,7 +86,7 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     return 'stone';
 }
 
-function checkCollisionServer(x, y, z, seed, customBlocks, roomId = null) {
+function checkCollisionServer(x, y, z, seed, customBlocks) {
     const radius = 0.25; const feetY = y; const headY = y + 1.7; 
     const pMinX = Math.floor(x - radius + 0.5); const pMaxX = Math.floor(x + radius + 0.5); 
     const pMinY = Math.floor(feetY + 0.5); const pMaxY = Math.floor(headY + 0.5); 
@@ -106,28 +102,13 @@ function checkCollisionServer(x, y, z, seed, customBlocks, roomId = null) {
             }
         }
     }
-    if (roomId && sessions[roomId]) {
-        for (let pid in sessions[roomId].players) {
-            const p = sessions[roomId].players[pid];
-            if (p.health > 0) {
-                if (Math.abs(x - p.x) < 0.6 && Math.abs(z - p.z) < 0.6 && feetY < p.y + 0.2 && headY > p.y - 1.5) return true;
-            }
-        }
-    }
     return false;
 }
 
 function hasLineOfSight(x1, y1, z1, x2, y2, z2, seed, customBlocks) {
-    let dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
-    let dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-    if (dist === 0) return true;
-    let step = Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz));
-    dx /= step; dy /= step; dz /= step;
-    let x = x1, y = y1, z = z1;
-    for (let i = 0; i < step; i++) {
-        if (getBlockAt(x, y, z, seed, customBlocks) !== 'air') return false;
-        x += dx; y += dy; z += dz;
-    }
+    let dist = Math.sqrt(Math.pow(x2-x1, 2) + Math.pow(y2-y1, 2) + Math.pow(z2-z1, 2));
+    let dx = (x2-x1)/dist; let dy = (y2-y1)/dist; let dz = (z2-z1)/dist;
+    for(let i=0.5; i<dist; i+=0.5) { if (getBlockAt(x1 + dx*i, y1 + dy*i, z1 + dz*i, seed, customBlocks) !== 'air') return false; }
     return true;
 }
 
@@ -288,93 +269,17 @@ io.on('connection', (socket) => {
         socket.disconnect(); 
     });
 
-    socket.on('move', (data) => { 
-        const room = sessions[socket.roomId];
-        if (room && room.players[socket.id]) { 
-            const p = room.players[socket.id];
-            const distSq = Math.pow(p.x - data.x, 2) + Math.pow(p.y - data.y, 2) + Math.pow(p.z - data.z, 2);
-            if (distSq > 400) return; // Anti-teleport
-            Object.assign(p, data); 
-            socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); 
-        } 
-    });
-    
-    socket.on('startMining', (data) => {
-        const room = sessions[socket.roomId]; if (!room) return; 
-        const p = room.players[socket.id]; if (!p) return;
-        p.miningPos = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`;
-        p.miningStartTime = Date.now();
-    });
-
-    socket.on('requestBlockBreak', (data) => { 
-        const room = sessions[socket.roomId]; if (!room) return; 
-        const p = room.players[socket.id]; if (!p) return;
-        if (Math.pow(p.x - data.x, 2) + Math.pow(p.y - data.y, 2) + Math.pow(p.z - data.z, 2) > 150) return; // Anti-reach
-        const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
-        const actualType = getBlockAt(data.x, data.y, data.z, room.seed, room.blocks); 
-        if (actualType === 'air' || actualType === 'bedrock') return; 
-        
-        const elapsed = Date.now() - (p.miningStartTime || 0);
-        if (p.miningPos !== key || elapsed < 100) return; // Anti-cheat mining time
-        p.miningPos = null;
-
-        room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); 
-        
-        const neighbors = [[1,0,0], [-1,0,0], [0,1,0], [0,0,1], [0,0,-1]];
-        for (let offset of neighbors) {
-            if (getBlockAt(data.x + offset[0], data.y + offset[1], data.z + offset[2], room.seed, room.blocks) === 'water') {
-                room.activeWaterUpdates = room.activeWaterUpdates || [];
-                room.activeWaterUpdates.push({x: data.x, y: data.y, z: data.z});
-                break;
-            }
-        }
-
-        const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; 
-        room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
-    });
-    
-    socket.on('requestBlockPlace', (data) => { 
-        const room = sessions[socket.roomId]; if (!room) return; 
-        const p = room.players[socket.id]; if (!p) return;
-        if (Math.pow(p.x - data.x, 2) + Math.pow(p.y - data.y, 2) + Math.pow(p.z - data.z, 2) > 150) return; // Anti-reach
-        const actualType = getBlockAt(data.x, data.y, data.z, room.seed, room.blocks);
-        if (actualType !== 'air' && actualType !== 'water') return; // Cannot place inside blocks
-
-        const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
-        room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); 
-        
-        if (data.type === 'water') {
-            room.activeWaterUpdates = room.activeWaterUpdates || [];
-            room.activeWaterUpdates.push({x: data.x, y: data.y - 1, z: data.z});
-            room.activeWaterUpdates.push({x: data.x+1, y: data.y, z: data.z});
-            room.activeWaterUpdates.push({x: data.x-1, y: data.y, z: data.z});
-            room.activeWaterUpdates.push({x: data.x, y: data.y, z: data.z+1});
-            room.activeWaterUpdates.push({x: data.x, y: data.y, z: data.z-1});
-        }
-    });
-    socket.on('requestDropItem', (data) => { 
-        const room = sessions[socket.roomId]; if (!room) return; 
-        const p = room.players[socket.id]; if (!p) return;
-        if (Math.pow(p.x - data.x, 2) + Math.pow(p.y - data.y, 2) + Math.pow(p.z - data.z, 2) > 150) return; // Anti-reach
-        const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; 
-        room.drops[dropId] = room.drops[dropId] || dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
-    });
-    socket.on('requestPickup', (dropId) => { 
-        const room = sessions[socket.roomId]; 
-        if(room && room.drops[dropId]) { 
-            const p = room.players[socket.id]; const d = room.drops[dropId];
-            if (!p || Math.pow(p.x - d.x, 2) + Math.pow(p.y - d.y, 2) + Math.pow(p.z - d.z, 2) > 100) return; // Anti-reach
-            const itemType = room.drops[dropId].type; delete room.drops[dropId]; 
-            socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); 
-        } 
-    });
+    socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
+    socket.on('requestBlockBreak', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
+    socket.on('requestBlockPlace', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); });
+    socket.on('requestDropItem', (data) => { const room = sessions[socket.roomId]; if (!room) return; const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; room.drops[dropId] = room.drops[dropId] || dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
+    socket.on('requestPickup', (dropId) => { const room = sessions[socket.roomId]; if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); } });
     
     socket.on('requestPlayerDamage', (data) => { 
         const room = sessions[socket.roomId]; 
         if (room && room.players[socket.id]) { 
-            let dmg = Math.min(Number(data.dmg) || 0, 100); // Cap damage
-            room.players[socket.id].health -= dmg; 
-            io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: dmg, source: data.source }); 
+            room.players[socket.id].health -= data.dmg; 
+            io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: data.dmg, source: data.source }); 
             if (room.players[socket.id].health <= 0) {
                 const playerName = room.players[socket.id].name;
                 const deathMsg = `💀 ${playerName} was slain by a ${data.source.toUpperCase()}!`;
@@ -386,12 +291,7 @@ io.on('connection', (socket) => {
     socket.on('requestMobAttack', (data) => {
         const room = sessions[socket.roomId];
         if (room && room.mobs[data.id]) {
-            const p = room.players[socket.id];
-            if (!p) return;
-            const mob = room.mobs[data.id];
-            if (Math.pow(p.x - mob.x, 2) + Math.pow(p.y - mob.y, 2) + Math.pow(p.z - mob.z, 2) > 600) return; // Limit attack range
-            let dmg = Math.min(Number(data.dmg) || 0, 50); // Cap damage
-            room.mobs[data.id].health -= dmg; io.in(socket.roomId).emit('mobDamaged', { id: data.id, kbDir: data.kbDir });
+            room.mobs[data.id].health -= data.dmg; io.in(socket.roomId).emit('mobDamaged', { id: data.id, kbDir: data.kbDir });
             
             if (room.mobs[data.id].health <= 0) { 
                 const mobType = room.mobs[data.id].type.toUpperCase(); 
@@ -402,19 +302,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('playerRespawn', () => { 
-        if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) {
-            const room = sessions[socket.roomId];
-            const p = room.players[socket.id];
-            p.health = 100;
-            const px = 16 + (Math.random() * 20 - 10);
-            const pz = 16 + (Math.random() * 20 - 10);
-            const py = getValidSpawnY(px, pz, room.seed, room.blocks) || 12;
-            p.x = px; p.z = pz; p.y = py + 2;
-            socket.emit('restore_player_data', { inventory: null, x: px, y: py + 2, z: pz, health: 100 });
-            io.in(socket.roomId).emit('newPlayer', { id: socket.id, player: p });
-        }
-    });
+    socket.on('playerRespawn', () => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) sessions[socket.roomId].players[socket.id].health = 100; });
     
     socket.on('disconnect', () => { 
         if(socket.roomId && sessions[socket.roomId]) { 
@@ -460,38 +348,8 @@ setInterval(() => {
             else if (room.mobs[m].type === 'archer') currentArchers++;
         }
 
-        for (let dropId in room.drops) {
-            let d = room.drops[dropId];
-            if (d.vy === undefined) d.vy = 0;
-            if (!d.isGrounded) {
-                d.vy -= 15 * 0.05; d.y += d.vy * 0.05;
-                if (getBlockAt(d.x, d.y - 0.2, d.z, room.seed, room.blocks) !== 'air') {
-                    d.y = Math.floor(d.y - 0.2) + 0.5 + 0.2; d.vy = 0; d.isGrounded = true;
-                }
-                if (d.y < -40) delete room.drops[dropId];
-            }
-        }
-
-        if (room.activeWaterUpdates && room.activeWaterUpdates.length > 0) {
-            let nextUpdates = []; let processed = new Set();
-            for (let pos of room.activeWaterUpdates) {
-                const key = `${pos.x},${pos.y},${pos.z}`;
-                if (processed.has(key)) continue; processed.add(key);
-                if (getBlockAt(pos.x, pos.y, pos.z, room.seed, room.blocks) === 'air') {
-                    room.blocks[key] = 'water';
-                    io.in(roomId).emit('blockUpdate', { action: 'add', x: pos.x, y: pos.y, z: pos.z, type: 'water' });
-                    nextUpdates.push({x: pos.x, y: pos.y - 1, z: pos.z});
-                    nextUpdates.push({x: pos.x + 1, y: pos.y, z: pos.z});
-                    nextUpdates.push({x: pos.x - 1, y: pos.y, z: pos.z});
-                    nextUpdates.push({x: pos.x, y: pos.y, z: pos.z + 1});
-                    nextUpdates.push({x: pos.x, y: pos.y, z: pos.z - 1});
-                }
-            }
-            room.activeWaterUpdates = nextUpdates.slice(0, 100); 
-        }
-
         if (Object.keys(room.mobs).length < 25 && (now - room.lastSpawnTime > 1000)) {
-            const spawnChance = isDay ? 0.005 : 0.05; 
+            const spawnChance = isDay ? 0.05 : 0.4; 
             
             if (Math.random() < spawnChance) {
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
@@ -503,12 +361,6 @@ setInterval(() => {
                 const floorY = getValidSpawnY(mx, mz, room.seed, room.blocks);
 
                 if (floorY !== null) { 
-                    let hasRoof = false;
-                    for(let ty = floorY + 1; ty < floorY + 30; ty++) { 
-                        if(getBlockAt(mx, ty, mz, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } 
-                    }
-                    if (isDay && !hasRoof) continue; // Skip if no roof during daytime
-
                     const id = 'mob_' + globalIdCounter++; 
                     let isZombie;
                     if (isDay) { isZombie = true; } else { if (currentArchers < 6) { isZombie = Math.random() > 0.35; } else { isZombie = true; } }
@@ -537,10 +389,7 @@ setInterval(() => {
             }
 
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
-            
-            let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water' || getBlockAt(mob.x, mob.y + 1, mob.z, room.seed, room.blocks) === 'water';
-            let mobSpeed = mob.type === 'zombie' ? 2.5 : 2.0; 
-            if (inWater) mobSpeed = mob.type === 'zombie' ? 1.5 : 1.2;
+            const mobSpeed = mob.type === 'zombie' ? 2.5 : 2.0; 
 
             mob.isBurning = false; let hasRoof = false;
             
@@ -606,41 +455,42 @@ setInterval(() => {
             }
 
             mob.x += targetX;
-            if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks, roomId)) {
+            if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
                 mob.x -= targetX; 
                 if (mob.isGrounded && mob.isMoving) {
-                    if (!checkCollisionServer(mob.x + targetX, mob.y + 1.5, mob.z, room.seed, room.blocks, roomId)) {
+                    if (!checkCollisionServer(mob.x + targetX, mob.y + 1.5, mob.z, room.seed, room.blocks)) {
                         mob.vy = 8.5; mob.isGrounded = false;
                     }
                 }
-            } else {
-                mob.z += targetZ;
-                if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks, roomId)) {
-                    mob.z -= targetZ;
-                    if (mob.isGrounded && mob.isMoving) {
-                        if (!checkCollisionServer(mob.x, mob.y + 1.5, mob.z + targetZ, room.seed, room.blocks, roomId)) {
-                            mob.vy = 8.5; mob.isGrounded = false;
-                        }
+            }
+            
+            mob.z += targetZ;
+            if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
+                mob.z -= targetZ; 
+                if (mob.isGrounded && mob.isMoving) {
+                    if (!checkCollisionServer(mob.x, mob.y + 1.5, mob.z + targetZ, room.seed, room.blocks)) {
+                        mob.vy = 8.5; mob.isGrounded = false;
                     }
                 }
             }
 
-            if (inWater) {
-                mob.vy -= 15 * 0.05 * 0.1;
-                if (mob.vy < -2) mob.vy = -2;
-                if (mob.isMoving && mob.vy < 2) mob.vy += 20 * 0.05; 
-            } else {
-                mob.vy -= 25.0 * 0.05; 
-            }
+            let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water';
+            if (inWater) { mob.vy = 2.0; } else { mob.vy -= 25.0 * 0.05; }
 
-            mob.y += mob.vy * 0.05;
-            if (mob.vy < 0 && checkCollisionServer(mob.x, mob.y - 0.2, mob.z, room.seed, room.blocks, roomId)) {
-                mob.y = Math.floor(mob.y) + 0.5; mob.vy = 0; mob.isGrounded = true;
-            } else {
-                mob.isGrounded = false;
-            }
+            let yMove = mob.vy * 0.05;
+            let ySteps = Math.max(1, Math.ceil(Math.abs(yMove) / 0.1)); 
+            let yStepAmt = yMove / ySteps;
 
-            io.in(roomId).emit('mobUpdate', mob);
+            for (let i = 0; i < ySteps; i++) {
+                mob.y += yStepAmt;
+                if (mob.vy < 0) { 
+                    if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
+                        mob.y -= yStepAmt; mob.y = Math.floor(mob.y - 0.001) + 0.5; mob.vy = 0; mob.isGrounded = true; break; 
+                    } else { mob.isGrounded = false; } 
+                } else if (mob.vy > 0) { 
+                    if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { mob.y -= yStepAmt; mob.vy = 0; break; } 
+                }
+            }
 
             let nearestDistToAnyPlayer = 9999;
             for (let pid in room.players) {
