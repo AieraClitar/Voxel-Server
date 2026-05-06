@@ -66,7 +66,10 @@ function getBlockAt(x, y, z, seed, customBlocks) {
         if (Math.abs(n1) < 0.12 && Math.abs(n2) < 0.12) isCave = true;
     }
 
-    if (isCave) return 'air';
+    if (isCave) {
+        if (by <= -25) return 'lava';
+        return 'air';
+    }
     
     if (by > elevation) {
         if (by <= 5) return (biome === 'tundra' && by === 5) ? 'ice' : 'water';
@@ -96,7 +99,7 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
         for (let by = pMinY; by <= pMaxY; by++) {
             for (let bz = pMinZ; bz <= pMaxZ; bz++) {
                 const type = getBlockAt(bx, by, bz, seed, customBlocks);
-                if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
+                if (type !== 'air' && type !== 'water' && type !== 'lava' && type !== 'torch' && type !== 'leaves') {
                     if (feetY < by + 0.5 && headY > by - 0.5) return true;
                 }
             }
@@ -116,7 +119,7 @@ function getValidSpawnY(x, z, seed, customBlocks) {
     let validFloors = [];
     for (let y = -28; y <= 60; y++) {
         const type = getBlockAt(x, y, z, seed, customBlocks);
-        if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves' && type !== 'wood') {
+        if (type !== 'air' && type !== 'water' && type !== 'lava' && type !== 'torch' && type !== 'leaves' && type !== 'wood') {
             const blockAbove1 = getBlockAt(x, y + 1, z, seed, customBlocks);
             const blockAbove2 = getBlockAt(x, y + 2, z, seed, customBlocks);
             if ((blockAbove1 === 'air' || blockAbove1 === 'torch' || blockAbove1 === 'leaves') && 
@@ -196,9 +199,9 @@ io.on('connection', (socket) => {
             hostName: hostName, 
             passcode: passcode, 
             players: {}, blocks: blocks, drops: {}, mobs: {}, startTime: Date.now(), lastSpawnTime: 0,
-            savedPlayers: loadedPlayers 
+            savedPlayers: loadedPlayers,
+            fluidQueue: [], activeFluids: new Set()
         };
-        
         joinRoom(socket, roomId, hostName); 
         broadcastLobby(); 
     });
@@ -220,7 +223,9 @@ io.on('connection', (socket) => {
     function joinRoom(socket, roomId, playerName) {
         socket.join(roomId); socket.roomId = roomId; const room = sessions[roomId];
         
-        let px = 16, py = 10, pz = 16;
+        let px = 16, pz = 16;
+        let py = getValidSpawnY(px, pz, room.seed, room.blocks) || 60;
+        py += 2; // Spawn 2 blocks above the floor to prevent clipping
         let pHealth = 100;
         let hasSavedData = false;
         let savedInv = null;
@@ -270,8 +275,32 @@ io.on('connection', (socket) => {
     });
 
     socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
-    socket.on('requestBlockBreak', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
-    socket.on('requestBlockPlace', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); });
+    socket.on('requestBlockBreak', (data) => { 
+        const room = sessions[socket.roomId]; if (!room) return; 
+        const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
+        const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; 
+        room.blocks[key] = 'air'; 
+        
+        // Fluid flow update around broken block
+        const offsets = [[0,1,0],[1,0,0],[-1,0,0],[0,0,1],[0,0,-1]];
+        offsets.forEach(off => {
+            const tx = Math.floor(data.x)+off[0], ty = Math.floor(data.y)+off[1], tz = Math.floor(data.z)+off[2];
+            const tKey = `${tx},${ty},${tz}`;
+            if (room.blocks[tKey] === 'water' || room.blocks[tKey] === 'lava') room.activeFluids.add(tKey);
+        });
+
+        io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); 
+        const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
+    });
+    
+    socket.on('requestBlockPlace', (data) => { 
+        const room = sessions[socket.roomId]; if (!room) return; 
+        const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
+        room.blocks[key] = data.type; 
+        if (data.type === 'water' || data.type === 'lava') room.activeFluids.add(key);
+        io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); 
+    });
+    
     socket.on('requestDropItem', (data) => { const room = sessions[socket.roomId]; if (!room) return; const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; room.drops[dropId] = room.drops[dropId] || dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
     socket.on('requestPickup', (dropId) => { const room = sessions[socket.roomId]; if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); } });
     
@@ -365,10 +394,11 @@ setInterval(() => {
                     let isZombie;
                     if (isDay) { isZombie = true; } else { if (currentArchers < 6) { isZombie = Math.random() > 0.35; } else { isZombie = true; } }
 
-                    const faceType = isZombie ? 'zombie_face' : 'archer_face';
                     const zombieWeapons = ['none', 'wooden_sword', 'stone_sword', 'wooden_axe', 'stone_pickaxe', 'wooden_shovel'];
                     const archerWeapons = ['bow', 'crossbow', 'gun'];
                     const weapon = isZombie ? zombieWeapons[Math.floor(Math.random() * zombieWeapons.length)] : archerWeapons[Math.floor(Math.random() * archerWeapons.length)];
+                    const zombieFaces = ['zombie_face', 'zombie_face_var1', 'zombie_face_var2'];
+                    const faceType = isZombie ? zombieFaces[Math.floor(Math.random() * zombieFaces.length)] : (weapon === 'gun' ? 'archer_face_gun' : (weapon === 'crossbow' ? 'archer_face_crossbow' : 'archer_face_bow'));
 
                     room.mobs[id] = { 
                         id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
@@ -401,6 +431,17 @@ setInterval(() => {
                 mob.isBurning = true; 
                 if (Math.random() < 0.1) {
                     mob.health -= 5; io.in(roomId).emit('mobDamaged', { id: mob.id, kbDir: {x:0, y:0, z:0} });
+                    if (mob.health <= 0) { delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); continue; }
+                }
+            }
+            
+            let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water';
+            let inLava = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'lava';
+
+            if (inLava) {
+                mob.isBurning = true;
+                if (Math.random() < 0.2) {
+                    mob.health -= 15; io.in(roomId).emit('mobDamaged', { id: mob.id, kbDir: {x:0, y:0, z:0} });
                     if (mob.health <= 0) { delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); continue; }
                 }
             }
@@ -474,8 +515,7 @@ setInterval(() => {
                 }
             }
 
-            let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water';
-            if (inWater) { mob.vy = 2.0; } else { mob.vy -= 25.0 * 0.05; }
+            if (inWater || inLava) { mob.vy = 2.0; } else { mob.vy -= 25.0 * 0.05; }
 
             let yMove = mob.vy * 0.05;
             let ySteps = Math.max(1, Math.ceil(Math.abs(yMove) / 0.1)); 
@@ -503,9 +543,55 @@ setInterval(() => {
                 delete room.mobs[mobId]; io.in(roomId).emit('mobDespawned', mobId); 
             }
         }
+        
+        for (let pid in room.players) {
+            let p = room.players[pid];
+            if (p.health <= 0) continue;
+            if (getBlockAt(p.x, p.y - 1.5, p.z, room.seed, room.blocks) === 'lava' || getBlockAt(p.x, p.y, p.z, room.seed, room.blocks) === 'lava') {
+                if (Math.random() < 0.1) {
+                    p.health -= 10;
+                    io.in(roomId).emit('playerDamaged', { id: pid, dmg: 10, source: 'Lava' });
+                    if (p.health <= 0) {
+                        io.in(roomId).emit('mobKilled', { mobId: 'none', killerName: `🔥 ${p.name} burned to death in LAVA!`, mobType: '' });
+                    }
+                }
+            }
+        }
+
         io.in(roomId).emit('server_tick', { players: room.players, mobs: room.mobs });
     }
 }, 50);
+
+setInterval(() => {
+    for (let roomId in sessions) {
+        const room = sessions[roomId];
+        if (room.activeFluids && room.activeFluids.size > 0) {
+            let nextFluids = new Set();
+            for (let fKey of room.activeFluids) {
+                const [fx, fy, fz] = fKey.split(',').map(Number);
+                const type = room.blocks[fKey];
+                if (type !== 'water' && type !== 'lava') continue;
+                
+                const dKey = `${fx},${fy-1},${fz}`;
+                const dType = getBlockAt(fx, fy-1, fz, room.seed, room.blocks);
+                if (dType === 'air') {
+                    room.blocks[dKey] = type; nextFluids.add(dKey);
+                    io.in(roomId).emit('blockUpdate', { action: 'add', x: fx, y: fy-1, z: fz, type: type });
+                } else if (dType !== 'water' && dType !== 'lava') {
+                    const sides = [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1]];
+                    for (let s of sides) {
+                        const sKey = `${fx+s[0]},${fy},${fz+s[2]}`;
+                        if (getBlockAt(fx+s[0], fy, fz+s[2], room.seed, room.blocks) === 'air') {
+                            room.blocks[sKey] = type; nextFluids.add(sKey);
+                            io.in(roomId).emit('blockUpdate', { action: 'add', x: fx+s[0], y: fy, z: fz+s[2], type: type });
+                        }
+                    }
+                }
+            }
+            room.activeFluids = nextFluids;
+        }
+    }
+}, 500);
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Multiplayer Server running on port ${PORT}`));
