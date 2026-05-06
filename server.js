@@ -63,17 +63,17 @@ function getBlockAt(x, y, z, seed, customBlocks) {
 
     const WATER_LEVEL = 5;
 
-    if (by === -30) return 'bedrock';
-    if (by > Math.max(height, WATER_LEVEL)) {
-        if (!isCave && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03 && biome !== 'tundra') return 'wood';
-        return 'air';
-    }
-
     let isCave = false;
     if (by <= height && by > -30) {
         let n1 = rough.getNoise(bx * 0.04, by * 0.04 + bz * 0.01); 
         let n2 = humidMap.getNoise(bz * 0.04, by * 0.04 + bx * 0.01); 
         if (Math.abs(n1) < 0.12 && Math.abs(n2) < 0.12) isCave = true;
+    }
+
+    if (by === -30) return 'bedrock';
+    if (by > Math.max(height, WATER_LEVEL)) {
+        if (!isCave && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03 && biome !== 'tundra') return 'wood';
+        return 'air';
     }
 
     if (isCave) {
