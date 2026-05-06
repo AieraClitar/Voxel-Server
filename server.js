@@ -391,7 +391,7 @@ setInterval(() => {
         }
 
         if (Object.keys(room.mobs).length < 25 && (now - room.lastSpawnTime > 1000)) {
-            const spawnChance = isDay ? 0.05 : 0.4; 
+            const spawnChance = isDay ? 0.005 : 0.05; 
             
             if (Math.random() < spawnChance) {
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
@@ -403,6 +403,12 @@ setInterval(() => {
                 const floorY = getValidSpawnY(mx, mz, room.seed, room.blocks);
 
                 if (floorY !== null) { 
+                    let hasRoof = false;
+                    for(let ty = floorY + 1; ty < floorY + 30; ty++) { 
+                        if(getBlockAt(mx, ty, mz, room.seed, room.blocks) !== 'air') { hasRoof = true; break; } 
+                    }
+                    if (isDay && !hasRoof) continue; // Skip if no roof during daytime
+
                     const id = 'mob_' + globalIdCounter++; 
                     let isZombie;
                     if (isDay) { isZombie = true; } else { if (currentArchers < 6) { isZombie = Math.random() > 0.35; } else { isZombie = true; } }
