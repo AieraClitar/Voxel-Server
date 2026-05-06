@@ -21,11 +21,9 @@ try {
 }
 
 function saveDatabase() {
-    try {
-        fs.writeFileSync(DB_FILE, JSON.stringify(savedWorlds));
-    } catch (err) {
-        console.error("Failed to save database:", err);
-    }
+    fs.writeFile(DB_FILE, JSON.stringify(savedWorlds), (err) => {
+        if (err) console.error("Failed to save database:", err);
+    });
 }
 
 class SimpleNoise {
@@ -43,16 +41,22 @@ class SimpleNoise {
     }
 }
 
+const noiseCache = {};
+function getNoiseGenerators(seed) {
+    if (!noiseCache[seed]) {
+        noiseCache[seed] = { noise: new SimpleNoise(seed), rough: new SimpleNoise(seed + 1337), trees: new SimpleNoise(seed + 888), tempMap: new SimpleNoise(seed + 555), humidMap: new SimpleNoise(seed + 999) };
+    }
+    return noiseCache[seed];
+}
+
 function getBlockAt(x, y, z, seed, customBlocks) {
     const bx = Math.floor(x); const by = Math.floor(y); const bz = Math.floor(z);
     const key = `${bx},${by},${bz}`;
     if (customBlocks[key]) return customBlocks[key];
     
-    const noise = new SimpleNoise(seed); 
-    const rough = new SimpleNoise(seed + 1337); 
-    const trees = new SimpleNoise(seed + 888);
-    const tempMap = new SimpleNoise(seed + 555);
-    const humidMap = new SimpleNoise(seed + 999);
+    const gens = getNoiseGenerators(seed);
+    const noise = gens.noise; const rough = gens.rough; const trees = gens.trees;
+    const tempMap = gens.tempMap; const humidMap = gens.humidMap;
     
     let elevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
     let temp = tempMap.getNoise(bx * 0.005, bz * 0.005);
@@ -269,17 +273,50 @@ io.on('connection', (socket) => {
         socket.disconnect(); 
     });
 
-    socket.on('move', (data) => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) { Object.assign(sessions[socket.roomId].players[socket.id], data); socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); } });
-    socket.on('requestBlockBreak', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
-    socket.on('requestBlockPlace', (data) => { const room = sessions[socket.roomId]; if (!room) return; const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); });
-    socket.on('requestDropItem', (data) => { const room = sessions[socket.roomId]; if (!room) return; const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; room.drops[dropId] = room.drops[dropId] || dropData; io.in(socket.roomId).emit('item_spawned', dropData); });
+    socket.on('move', (data) => { 
+        const room = sessions[socket.roomId];
+        if (room && room.players[socket.id]) { 
+            const p = room.players[socket.id];
+            const distSq = Math.pow(p.x - data.x, 2) + Math.pow(p.y - data.y, 2) + Math.pow(p.z - data.z, 2);
+            if (distSq > 400) return; // Anti-teleport
+            Object.assign(p, data); 
+            socket.broadcast.to(socket.roomId).emit('playerMoved', { id: socket.id, ...data }); 
+        } 
+    });
+    
+    socket.on('requestBlockBreak', (data) => { 
+        const room = sessions[socket.roomId]; if (!room) return; 
+        const p = room.players[socket.id]; if (!p) return;
+        if (Math.pow(p.x - data.x, 2) + Math.pow(p.y - data.y, 2) + Math.pow(p.z - data.z, 2) > 150) return; // Anti-reach
+        const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
+        const actualType = room.blocks[key] || data.type; if (actualType === 'air') return; 
+        room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); 
+        const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; 
+        room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
+    });
+    
+    socket.on('requestBlockPlace', (data) => { 
+        const room = sessions[socket.roomId]; if (!room) return; 
+        const p = room.players[socket.id]; if (!p) return;
+        if (Math.pow(p.x - data.x, 2) + Math.pow(p.y - data.y, 2) + Math.pow(p.z - data.z, 2) > 150) return; // Anti-reach
+        const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
+        room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); 
+    });
+    socket.on('requestDropItem', (data) => { 
+        const room = sessions[socket.roomId]; if (!room) return; 
+        const p = room.players[socket.id]; if (!p) return;
+        if (Math.pow(p.x - data.x, 2) + Math.pow(p.y - data.y, 2) + Math.pow(p.z - data.z, 2) > 150) return; // Anti-reach
+        const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, ...data }; 
+        room.drops[dropId] = room.drops[dropId] || dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
+    });
     socket.on('requestPickup', (dropId) => { const room = sessions[socket.roomId]; if(room && room.drops[dropId]) { const itemType = room.drops[dropId].type; delete room.drops[dropId]; socket.emit('pickupSuccess', itemType); io.in(socket.roomId).emit('item_removed', dropId); } });
     
     socket.on('requestPlayerDamage', (data) => { 
         const room = sessions[socket.roomId]; 
         if (room && room.players[socket.id]) { 
-            room.players[socket.id].health -= data.dmg; 
-            io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: data.dmg, source: data.source }); 
+            let dmg = Math.min(Number(data.dmg) || 0, 100); // Cap damage
+            room.players[socket.id].health -= dmg; 
+            io.in(socket.roomId).emit('playerDamaged', { id: socket.id, dmg: dmg, source: data.source }); 
             if (room.players[socket.id].health <= 0) {
                 const playerName = room.players[socket.id].name;
                 const deathMsg = `💀 ${playerName} was slain by a ${data.source.toUpperCase()}!`;
@@ -291,7 +328,12 @@ io.on('connection', (socket) => {
     socket.on('requestMobAttack', (data) => {
         const room = sessions[socket.roomId];
         if (room && room.mobs[data.id]) {
-            room.mobs[data.id].health -= data.dmg; io.in(socket.roomId).emit('mobDamaged', { id: data.id, kbDir: data.kbDir });
+            const p = room.players[socket.id];
+            if (!p) return;
+            const mob = room.mobs[data.id];
+            if (Math.pow(p.x - mob.x, 2) + Math.pow(p.y - mob.y, 2) + Math.pow(p.z - mob.z, 2) > 600) return; // Limit attack range
+            let dmg = Math.min(Number(data.dmg) || 0, 50); // Cap damage
+            room.mobs[data.id].health -= dmg; io.in(socket.roomId).emit('mobDamaged', { id: data.id, kbDir: data.kbDir });
             
             if (room.mobs[data.id].health <= 0) { 
                 const mobType = room.mobs[data.id].type.toUpperCase(); 
