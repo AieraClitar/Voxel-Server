@@ -90,7 +90,7 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     return 'stone';
 }
 
-function checkCollisionServer(x, y, z, seed, customBlocks) {
+function checkCollisionServer(x, y, z, seed, customBlocks, roomId = null) {
     const radius = 0.25; const feetY = y; const headY = y + 1.7; 
     const pMinX = Math.floor(x - radius + 0.5); const pMaxX = Math.floor(x + radius + 0.5); 
     const pMinY = Math.floor(feetY + 0.5); const pMaxY = Math.floor(headY + 0.5); 
@@ -103,6 +103,14 @@ function checkCollisionServer(x, y, z, seed, customBlocks) {
                 if (type !== 'air' && type !== 'water' && type !== 'torch' && type !== 'leaves') {
                     if (feetY < by + 0.5 && headY > by - 0.5) return true;
                 }
+            }
+        }
+    }
+    if (roomId && sessions[roomId]) {
+        for (let pid in sessions[roomId].players) {
+            const p = sessions[roomId].players[pid];
+            if (p.health > 0) {
+                if (Math.abs(x - p.x) < 0.6 && Math.abs(z - p.z) < 0.6 && feetY < p.y + 0.2 && headY > p.y - 1.5) return true;
             }
         }
     }
@@ -311,6 +319,16 @@ io.on('connection', (socket) => {
         p.miningPos = null;
 
         room.blocks[key] = 'air'; io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); 
+        
+        const neighbors = [[1,0,0], [-1,0,0], [0,1,0], [0,0,1], [0,0,-1]];
+        for (let offset of neighbors) {
+            if (getBlockAt(data.x + offset[0], data.y + offset[1], data.z + offset[2], room.seed, room.blocks) === 'water') {
+                room.activeWaterUpdates = room.activeWaterUpdates || [];
+                room.activeWaterUpdates.push({x: data.x, y: data.y, z: data.z});
+                break;
+            }
+        }
+
         const dropId = 'drop_' + globalIdCounter++; const dropData = { id: dropId, x: data.x, y: data.y, z: data.z, type: actualType }; 
         room.drops[dropId] = dropData; io.in(socket.roomId).emit('item_spawned', dropData); 
     });
@@ -324,6 +342,15 @@ io.on('connection', (socket) => {
 
         const key = `${Math.floor(data.x)},${Math.floor(data.y)},${Math.floor(data.z)}`; 
         room.blocks[key] = data.type; io.in(socket.roomId).emit('blockUpdate', { action: 'add', x: data.x, y: data.y, z: data.z, type: data.type }); 
+        
+        if (data.type === 'water') {
+            room.activeWaterUpdates = room.activeWaterUpdates || [];
+            room.activeWaterUpdates.push({x: data.x, y: data.y - 1, z: data.z});
+            room.activeWaterUpdates.push({x: data.x+1, y: data.y, z: data.z});
+            room.activeWaterUpdates.push({x: data.x-1, y: data.y, z: data.z});
+            room.activeWaterUpdates.push({x: data.x, y: data.y, z: data.z+1});
+            room.activeWaterUpdates.push({x: data.x, y: data.y, z: data.z-1});
+        }
     });
     socket.on('requestDropItem', (data) => { 
         const room = sessions[socket.roomId]; if (!room) return; 
@@ -375,7 +402,19 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('playerRespawn', () => { if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) sessions[socket.roomId].players[socket.id].health = 100; });
+    socket.on('playerRespawn', () => { 
+        if(socket.roomId && sessions[socket.roomId] && sessions[socket.roomId].players[socket.id]) {
+            const room = sessions[socket.roomId];
+            const p = room.players[socket.id];
+            p.health = 100;
+            const px = 16 + (Math.random() * 20 - 10);
+            const pz = 16 + (Math.random() * 20 - 10);
+            const py = getValidSpawnY(px, pz, room.seed, room.blocks) || 12;
+            p.x = px; p.z = pz; p.y = py + 2;
+            socket.emit('restore_player_data', { inventory: null, x: px, y: py + 2, z: pz, health: 100 });
+            io.in(socket.roomId).emit('newPlayer', { id: socket.id, player: p });
+        }
+    });
     
     socket.on('disconnect', () => { 
         if(socket.roomId && sessions[socket.roomId]) { 
@@ -433,6 +472,24 @@ setInterval(() => {
             }
         }
 
+        if (room.activeWaterUpdates && room.activeWaterUpdates.length > 0) {
+            let nextUpdates = []; let processed = new Set();
+            for (let pos of room.activeWaterUpdates) {
+                const key = `${pos.x},${pos.y},${pos.z}`;
+                if (processed.has(key)) continue; processed.add(key);
+                if (getBlockAt(pos.x, pos.y, pos.z, room.seed, room.blocks) === 'air') {
+                    room.blocks[key] = 'water';
+                    io.in(roomId).emit('blockUpdate', { action: 'add', x: pos.x, y: pos.y, z: pos.z, type: 'water' });
+                    nextUpdates.push({x: pos.x, y: pos.y - 1, z: pos.z});
+                    nextUpdates.push({x: pos.x + 1, y: pos.y, z: pos.z});
+                    nextUpdates.push({x: pos.x - 1, y: pos.y, z: pos.z});
+                    nextUpdates.push({x: pos.x, y: pos.y, z: pos.z + 1});
+                    nextUpdates.push({x: pos.x, y: pos.y, z: pos.z - 1});
+                }
+            }
+            room.activeWaterUpdates = nextUpdates.slice(0, 100); 
+        }
+
         if (Object.keys(room.mobs).length < 25 && (now - room.lastSpawnTime > 1000)) {
             const spawnChance = isDay ? 0.005 : 0.05; 
             
@@ -480,7 +537,10 @@ setInterval(() => {
             }
 
             if (mob.attackTimer > 0) mob.attackTimer -= 0.05; 
-            const mobSpeed = mob.type === 'zombie' ? 2.5 : 2.0; 
+            
+            let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water' || getBlockAt(mob.x, mob.y + 1, mob.z, room.seed, room.blocks) === 'water';
+            let mobSpeed = mob.type === 'zombie' ? 2.5 : 2.0; 
+            if (inWater) mobSpeed = mob.type === 'zombie' ? 1.5 : 1.2;
 
             mob.isBurning = false; let hasRoof = false;
             
@@ -546,42 +606,41 @@ setInterval(() => {
             }
 
             mob.x += targetX;
-            if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
+            if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks, roomId)) {
                 mob.x -= targetX; 
                 if (mob.isGrounded && mob.isMoving) {
-                    if (!checkCollisionServer(mob.x + targetX, mob.y + 1.5, mob.z, room.seed, room.blocks)) {
+                    if (!checkCollisionServer(mob.x + targetX, mob.y + 1.5, mob.z, room.seed, room.blocks, roomId)) {
                         mob.vy = 8.5; mob.isGrounded = false;
                     }
                 }
-            }
-            
-            mob.z += targetZ;
-            if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) {
-                mob.z -= targetZ; 
-                if (mob.isGrounded && mob.isMoving) {
-                    if (!checkCollisionServer(mob.x, mob.y + 1.5, mob.z + targetZ, room.seed, room.blocks)) {
-                        mob.vy = 8.5; mob.isGrounded = false;
+            } else {
+                mob.z += targetZ;
+                if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks, roomId)) {
+                    mob.z -= targetZ;
+                    if (mob.isGrounded && mob.isMoving) {
+                        if (!checkCollisionServer(mob.x, mob.y + 1.5, mob.z + targetZ, room.seed, room.blocks, roomId)) {
+                            mob.vy = 8.5; mob.isGrounded = false;
+                        }
                     }
                 }
             }
 
-            let inWater = getBlockAt(mob.x, mob.y, mob.z, room.seed, room.blocks) === 'water';
-            if (inWater) { mob.vy = 2.0; } else { mob.vy -= 25.0 * 0.05; }
-
-            let yMove = mob.vy * 0.05;
-            let ySteps = Math.max(1, Math.ceil(Math.abs(yMove) / 0.1)); 
-            let yStepAmt = yMove / ySteps;
-
-            for (let i = 0; i < ySteps; i++) {
-                mob.y += yStepAmt;
-                if (mob.vy < 0) { 
-                    if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { 
-                        mob.y -= yStepAmt; mob.y = Math.floor(mob.y - 0.001) + 0.5; mob.vy = 0; mob.isGrounded = true; break; 
-                    } else { mob.isGrounded = false; } 
-                } else if (mob.vy > 0) { 
-                    if (checkCollisionServer(mob.x, mob.y, mob.z, room.seed, room.blocks)) { mob.y -= yStepAmt; mob.vy = 0; break; } 
-                }
+            if (inWater) {
+                mob.vy -= 15 * 0.05 * 0.1;
+                if (mob.vy < -2) mob.vy = -2;
+                if (mob.isMoving && mob.vy < 2) mob.vy += 20 * 0.05; 
+            } else {
+                mob.vy -= 25.0 * 0.05; 
             }
+
+            mob.y += mob.vy * 0.05;
+            if (mob.vy < 0 && checkCollisionServer(mob.x, mob.y - 0.2, mob.z, room.seed, room.blocks, roomId)) {
+                mob.y = Math.floor(mob.y) + 0.5; mob.vy = 0; mob.isGrounded = true;
+            } else {
+                mob.isGrounded = false;
+            }
+
+            io.in(roomId).emit('mobUpdate', mob);
 
             let nearestDistToAnyPlayer = 9999;
             for (let pid in room.players) {
