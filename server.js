@@ -54,13 +54,23 @@ function getBlockAt(x, y, z, seed, customBlocks) {
     const tempMap = new SimpleNoise(seed + 555);
     const humidMap = new SimpleNoise(seed + 999);
     
-    let elevation = Math.floor((noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8 + rough.getNoise(bx * 0.06, bz * 0.06) * 3) + 2;
+    let elevation = (noise.getNoise(bx * 0.015, bz * 0.015) + 1) * 8;
+    let detail = (rough.getNoise(bx * 0.06, bz * 0.06)) * 3;
+    let height = Math.floor(elevation + detail) + 2;
     let temp = tempMap.getNoise(bx * 0.005, bz * 0.005);
     let humid = humidMap.getNoise(bx * 0.005, bz * 0.005);
     let biome = 'plains'; if (temp > 0.2 && humid < 0) biome = 'desert'; else if (temp < -0.25) biome = 'tundra';
 
+    const WATER_LEVEL = 5;
+
+    if (by === -30) return 'bedrock';
+    if (by > Math.max(height, WATER_LEVEL)) {
+        if (!isCave && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03 && biome !== 'tundra') return 'wood';
+        return 'air';
+    }
+
     let isCave = false;
-    if (by <= elevation && by > -30) {
+    if (by <= height && by > -30) {
         let n1 = rough.getNoise(bx * 0.04, by * 0.04 + bz * 0.01); 
         let n2 = humidMap.getNoise(bz * 0.04, by * 0.04 + bx * 0.01); 
         if (Math.abs(n1) < 0.12 && Math.abs(n2) < 0.12) isCave = true;
@@ -70,22 +80,15 @@ function getBlockAt(x, y, z, seed, customBlocks) {
         if (by <= -25) return 'lava';
         return 'air';
     }
-    
-    if (by > elevation) {
-        if (by <= 5) return (biome === 'tundra' && by === 5) ? 'ice' : 'water';
-        let isTundra = biome === 'tundra';
-        if (!isTundra && by <= elevation + 5 && trees.getNoise(bx * 0.02, bz * 0.02) > 0.1 && Math.abs(trees.random(bx, bz)) < 0.03) return 'wood'; 
-        return 'air'; 
-    }
 
-    if (by === elevation) {
-        if (elevation < 5) return 'dirt'; 
+    if (by > height && by <= WATER_LEVEL) return (biome === 'tundra' && by === WATER_LEVEL) ? 'ice' : 'water';
+    if (by === height) {
+        if (height < WATER_LEVEL) return 'dirt';
         if (biome === 'desert') return 'sand';
         if (biome === 'tundra') return 'snow';
-        return elevation <= 6 ? 'sand' : 'grass';
+        return height <= WATER_LEVEL + 1 ? 'sand' : 'grass';
     }
-    
-    if (by > elevation - 3 && by !== -30) return biome === 'desert' ? 'sand' : 'dirt';
+    if (by > height - 3 && by !== -30) return biome === 'desert' ? 'sand' : 'dirt';
     return 'stone';
 }
 
@@ -286,7 +289,11 @@ io.on('connection', (socket) => {
         offsets.forEach(off => {
             const tx = Math.floor(data.x)+off[0], ty = Math.floor(data.y)+off[1], tz = Math.floor(data.z)+off[2];
             const tKey = `${tx},${ty},${tz}`;
-            if (room.blocks[tKey] === 'water' || room.blocks[tKey] === 'lava') room.activeFluids.add(tKey);
+            const tType = getBlockAt(tx, ty, tz, room.seed, room.blocks);
+            if (tType === 'water' || tType === 'lava') {
+                if (!room.blocks[tKey]) room.blocks[tKey] = tType; // Register natural fluid
+                room.activeFluids.add(tKey);
+            }
         });
 
         io.in(socket.roomId).emit('blockUpdate', { action: 'remove', x: data.x, y: data.y, z: data.z, type: actualType }); 
