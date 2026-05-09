@@ -66,7 +66,10 @@ function getBlockAt(x, y, z, seed, customBlocks) {
         if (Math.abs(n1) < 0.12 && Math.abs(n2) < 0.12) isCave = true;
     }
 
-    if (isCave) return 'air';
+    if (isCave) {
+        if (by <= 5) return 'water';
+        return 'air';
+    }
     
     if (by > elevation) {
         if (by <= 5) return (biome === 'tundra' && by === 5) ? 'ice' : 'water';
@@ -261,7 +264,6 @@ io.on('connection', (socket) => {
             saveDatabase();
         }
 
-        // ✨ THE FIX: We must broadcast the player disconnected signal explicitly BEFORE disconnecting the socket.
         socket.to(socket.roomId).emit('playerDisconnected', socket.id);
         delete room.players[socket.id];
 
@@ -348,8 +350,8 @@ setInterval(() => {
             else if (room.mobs[m].type === 'archer') currentArchers++;
         }
 
-        if (Object.keys(room.mobs).length < 25 && (now - room.lastSpawnTime > 1000)) {
-            const spawnChance = isDay ? 0.05 : 0.4; 
+        if (Object.keys(room.mobs).length < 20 && (now - room.lastSpawnTime > 4000)) {
+            const spawnChance = isDay ? 0.01 : 0.12; 
             
             if (Math.random() < spawnChance) {
                 const targetPlayer = room.players[playerIds[Math.floor(Math.random() * playerIds.length)]];
@@ -371,7 +373,7 @@ setInterval(() => {
                     const weapon = isZombie ? zombieWeapons[Math.floor(Math.random() * zombieWeapons.length)] : archerWeapons[Math.floor(Math.random() * archerWeapons.length)];
 
                     room.mobs[id] = { 
-                        id: id, type: isZombie ? 'zombie' : 'archer', weapon: weapon, face: faceType, 
+                        id: id, type: isZombie ? 'archer' : 'zombie', weapon: weapon, face: faceType, 
                         x: mx, y: floorY + 0.5, z: mz, vy: 0, ry: 0, rx: 0, health: 100, isMoving: false, isAttacking: false, isBurning: false, attackTimer: 0, isGrounded: false, roamTimer: 0
                     };
                     room.lastSpawnTime = now; io.in(roomId).emit('mobSpawned', room.mobs[id]);
